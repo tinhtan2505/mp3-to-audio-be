@@ -22,7 +22,7 @@ public class ProjectController {
     private final ProjectService service;
 
     @GetMapping("find-all")
-    public ResponseEntity<?> getOptions() {
+    public ResponseEntity<?> findAll() {
         var data = service.findAll();
         return ResponseEntity.ok(CustomResponse.success(data, "Thành công"));
     }

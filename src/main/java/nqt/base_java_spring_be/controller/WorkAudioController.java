@@ -23,7 +23,7 @@ public class WorkAudioController {
     private final WorkAudioService service;
 
     @PostMapping("/build")
-    public ResponseEntity<CustomResponse<Project>> build(@Valid @RequestBody ProjectCreateRequest req) {
+    public ResponseEntity<CustomResponse<Project>> build() {
         service.build();
         return ResponseEntity.ok(CustomResponse.success(null, "Tạo mới thành công"));
     }
