@@ -15,7 +15,7 @@ java {
 repositories { mavenCentral() }
 
 // Giữ nếu bạn cần ép Netty riêng
-extra["netty.version"] = "4.1.125.Final"
+extra["netty.version"] = "4.1.128.Final"
 
 dependencies {
 	// Spring Boot Starters (đồng bộ theo Boot 3.5.7)
@@ -27,6 +27,13 @@ dependencies {
 	implementation("org.springframework.boot:spring-boot-starter-websocket:3.5.7")
 	implementation("org.springframework.boot:spring-boot-starter-actuator:3.5.7")
 	implementation("org.springframework.boot:spring-boot-starter-reactor-netty:3.5.7")
+
+	implementation(platform("io.netty:netty-bom:4.1.128.Final"))
+	implementation("com.google.cloud:google-cloud-texttospeech:2.68.0")
+	implementation("com.fasterxml.jackson.core:jackson-databind:2.20.1")
+	implementation("com.fasterxml.jackson.module:jackson-module-parameter-names:2.20.1")
+	implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.20.1")
+	implementation("commons-io:commons-io:2.20.0")
 
 	// Ép Framework modules lên bản đã vá STOMP (6.2.12)
 	implementation("org.springframework:spring-messaging:6.2.12")
