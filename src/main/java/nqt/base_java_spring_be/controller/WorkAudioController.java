@@ -24,7 +24,7 @@ public class WorkAudioController {
 
     @PostMapping("/build")
     public ResponseEntity<CustomResponse<Project>> build() {
-        service.build();
+//        service.build();
         return ResponseEntity.ok(CustomResponse.success(null, "Tạo mới thành công"));
     }
 }
