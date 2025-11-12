@@ -68,8 +68,8 @@ public class TtsServiceImpl implements TtsService {
         return HexFormat.of().formatHex(md.digest(input.getBytes()));
     }
 
-    public void insertWords(TextToMp3Request req){
-        String directoryPath = "D:/BackUp Db/work";
+    public void insertWords(){
+        String directoryPath = "D:/My Project/MP3_TO_AUDIO/mp3";
         List<String> mp3Files = new ArrayList<>();
         File folder = new File(directoryPath);
 
@@ -107,7 +107,7 @@ public class TtsServiceImpl implements TtsService {
 
     @Override
     public void textToMp3(TextToMp3Request req){
-        String sentence = "ba biết anh bia",  outputFilePath = "D:/BackUp Db/word";
+        String sentence = req.getWord(),  outputFilePath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
         if (sentence == null || sentence.trim().isEmpty()) {
             throw new IllegalArgumentException("Câu nhập vào rỗng");
         }
