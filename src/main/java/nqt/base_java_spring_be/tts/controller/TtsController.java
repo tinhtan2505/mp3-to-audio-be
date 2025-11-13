@@ -70,8 +70,8 @@ public class TtsController {
     @PostMapping("/vi/text-to-mp3")
     public ResponseEntity<CustomResponse<?>> textToMp3(@Valid @RequestBody TextToMp3Request req) {
         try {
-            tts.textToMp3(req);
-            return ResponseEntity.ok(CustomResponse.success(null, "Thành công"));
+            byte[] data = tts.textToMp3(req);
+            return ResponseEntity.ok(CustomResponse.success(data, "Thành công"));
         } catch (IllegalArgumentException e) {
             // lỗi đầu vào -> 400
             log.warn(e.getMessage());

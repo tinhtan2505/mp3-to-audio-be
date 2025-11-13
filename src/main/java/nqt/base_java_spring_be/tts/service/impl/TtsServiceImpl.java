@@ -179,9 +179,9 @@ public class TtsServiceImpl implements TtsService {
     }
 
     @Override
-    public void textToMp3(TextToMp3Request req){
-//        String sentence = req.getWord(),  outputFilePath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
-        String sentence = "giá như chưa từng yêu chưa quan tâm nhiều về nhau",  outputFilePath = "D:/BackUp Db/word";
+    public byte[] textToMp3(TextToMp3Request req){
+        String sentence = req.getWord(),  outputFilePath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
+//        String sentence = "giá như chưa từng yêu chưa quan tâm nhiều về nhau",  outputFilePath = "D:/BackUp Db/word";
         if (sentence == null || sentence.trim().isEmpty()) {
             throw new IllegalArgumentException("Câu nhập vào rỗng");
         }
@@ -223,15 +223,24 @@ public class TtsServiceImpl implements TtsService {
             }
         }
 
-        String out = performFfmpegConcatFilterComplex(orderedFiles, outputFilePath, tmpDir);
+        // tạo đường dẫn file output tạm
+        Path outMp3 = tmpDir.resolve("tts_output.mp3");
+
+        String resultPath  = performFfmpegConcatFilterComplex(orderedFiles, outputFilePath, tmpDir);
 
         try {
-            Files.deleteIfExists(silenceFile);
-            // Files.deleteIfExists(tmpDir); // không thể xóa nếu không rỗng; tmp files auto-delete on exit
+            // đọc file mp3 ra byte[]
+            return Files.readAllBytes(Paths.get(resultPath));
         } catch (IOException e) {
-            // ignore
+            throw new RuntimeException("Không thể đọc file mp3 kết quả", e);
+        } finally {
+            // cleanup tạm: xóa files trong tmpDir (improve: log nếu xóa thất bại)
+            try {
+                Files.deleteIfExists(silenceFile);
+//                Files.deleteIfExists(Paths.get(resultPath));
+                Files.deleteIfExists(tmpDir);
+            } catch (Exception ignored) {}
         }
-
     }
 
     private List<String> splitToWords(String sentence) {
