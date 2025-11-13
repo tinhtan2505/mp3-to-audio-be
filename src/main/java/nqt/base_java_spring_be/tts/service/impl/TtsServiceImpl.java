@@ -9,16 +9,21 @@ import nqt.base_java_spring_be.utils.StreamGobbler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import javax.annotation.PostConstruct;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.*;
 import java.security.MessageDigest;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 
 @Service
 public class TtsServiceImpl implements TtsService {
+    private final String configuredFfmpegPath;
+    private String ffmpegCmdResolved;
 
     private final AzureTtsClient client;
     private final String storageDir;
@@ -28,10 +33,74 @@ public class TtsServiceImpl implements TtsService {
     public TtsServiceImpl(
             AzureTtsClient client,
             @Value("${app.tts.storage-dir:}") String storageDir,
+            @Value("${app.tts.ffmpeg-path:}") String ffmpegPath, // <-- add this
             WordsRepository wordsRepository) {
         this.client = client;
         this.storageDir = storageDir == null ? "" : storageDir.trim();
         this.wordsRepository = wordsRepository;
+        this.configuredFfmpegPath = ffmpegPath == null ? "" : ffmpegPath.trim();
+    }
+
+    @PostConstruct
+    private void init() {
+        try {
+            this.ffmpegCmdResolved = locateFfmpeg();
+            System.out.println("ffmpeg resolved to: " + this.ffmpegCmdResolved);
+            // debug: show PATH visible to the JVM
+            System.out.println("JVM PATH=" + System.getenv("PATH"));
+        } catch (RuntimeException ex) {
+            System.err.println("ffmpeg not found: " + ex.getMessage());
+            this.ffmpegCmdResolved = null;
+        }
+    }
+
+    private String locateFfmpeg() {
+        // 1) nếu cấu hình đường dẫn được cung cấp
+        if (configuredFfmpegPath != null && !configuredFfmpegPath.isBlank()) {
+            Path p = Paths.get(configuredFfmpegPath);
+            if (Files.isExecutable(p)) return p.toAbsolutePath().toString();
+            // nếu người dùng truyền folder thì thêm ffmpeg.exe
+            if (Files.isDirectory(p)) {
+                Path candidate = p.resolve(isWindows() ? "ffmpeg.exe" : "ffmpeg");
+                if (Files.isExecutable(candidate)) return candidate.toAbsolutePath().toString();
+            }
+            // thử thêm .exe trên Windows nếu cần
+            if (isWindows() && !configuredFfmpegPath.toLowerCase().endsWith(".exe")) {
+                Path candidate = Paths.get(configuredFfmpegPath + ".exe");
+                if (Files.isExecutable(candidate)) return candidate.toAbsolutePath().toString();
+            }
+            throw new RuntimeException("Configured ffmpeg path not found or not executable: " + configuredFfmpegPath);
+        }
+
+        // 2) tìm trong PATH
+        String pathEnv = System.getenv("PATH");
+        if (pathEnv != null) {
+            for (String part : pathEnv.split(File.pathSeparator)) {
+                Path candidate = Paths.get(part, isWindows() ? "ffmpeg.exe" : "ffmpeg");
+                if (Files.isExecutable(candidate)) {
+                    return candidate.toAbsolutePath().toString();
+                }
+            }
+        }
+
+        // 3) fallback: thử command 'where' hoặc 'which'
+        try {
+            ProcessBuilder pb = isWindows() ?
+                    new ProcessBuilder("cmd", "/c", "where ffmpeg") :
+                    new ProcessBuilder("sh", "-c", "which ffmpeg");
+            Process p = pb.start();
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line = br.readLine();
+                if (line != null && !line.isBlank()) return line.trim();
+            }
+            p.waitFor();
+        } catch (Exception ignored) {}
+
+        throw new RuntimeException("ffmpeg not found in PATH and no app.tts.ffmpeg-path configured");
+    }
+
+    private boolean isWindows() {
+        return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
     @Override
@@ -69,7 +138,8 @@ public class TtsServiceImpl implements TtsService {
     }
 
     public void insertWords(){
-        String directoryPath = "D:/My Project/MP3_TO_AUDIO/mp3";
+//        String directoryPath = "D:/My Project/MP3_TO_AUDIO/mp3";
+        String directoryPath = "D:/BackUp Db/work";
         List<String> mp3Files = new ArrayList<>();
         File folder = new File(directoryPath);
 
@@ -98,8 +168,11 @@ public class TtsServiceImpl implements TtsService {
                 String nameWithoutExt = (dotIndex > 0) ? fileName.substring(0, dotIndex) : fileName;
                 String extension = (dotIndex > 0) ? fileName.substring(dotIndex + 1) : "";
 
-                Words word = new Words(file.getName(), nameWithoutExt, extension, file.getAbsolutePath());
-                words.add(word);
+                Optional<Words> opt = wordsRepository.findFirstByNameIgnoreCase(nameWithoutExt);
+                if (opt.isEmpty()) {
+                    Words word = new Words(file.getName(), nameWithoutExt, extension, file.getAbsolutePath());
+                    words.add(word);
+                }
             }
         }
         wordsRepository.saveAll(words);
@@ -107,7 +180,8 @@ public class TtsServiceImpl implements TtsService {
 
     @Override
     public void textToMp3(TextToMp3Request req){
-        String sentence = req.getWord(),  outputFilePath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
+//        String sentence = req.getWord(),  outputFilePath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
+        String sentence = "giá như chưa từng yêu chưa quan tâm nhiều về nhau",  outputFilePath = "D:/BackUp Db/word";
         if (sentence == null || sentence.trim().isEmpty()) {
             throw new IllegalArgumentException("Câu nhập vào rỗng");
         }
@@ -175,8 +249,12 @@ public class TtsServiceImpl implements TtsService {
     }
 
     private void createSilenceMp3(String silencePath, double seconds) {
+        if (ffmpegCmdResolved == null) {
+            throw new IllegalStateException("ffmpeg not available. Configure app.tts.ffmpeg-path or add ffmpeg to PATH and restart.");
+        }
+
         List<String> cmd = Arrays.asList(
-                "ffmpeg", "-y",
+                ffmpegCmdResolved, "-y",
                 "-f", "lavfi",
                 "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-t", String.valueOf(seconds),
@@ -219,22 +297,46 @@ public class TtsServiceImpl implements TtsService {
         if (inputs == null || inputs.isEmpty()) {
             throw new IllegalArgumentException("No input files");
         }
+        if (ffmpegCmdResolved == null) {
+            throw new IllegalStateException("ffmpeg not available. Configure app.tts.ffmpeg-path or add ffmpeg to PATH and restart.");
+        }
+
+        // Ensure outputFilePath is a file with .mp3 extension (not a directory)
+        Path outPath = Paths.get(outputFilePath);
+        if (Files.isDirectory(outPath) || !outputFilePath.toLowerCase().endsWith(".mp3")) {
+            String fileName = "tts_" + LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")) + ".mp3";
+
+            if (Files.isDirectory(outPath)) {
+                outPath = outPath.resolve(fileName);
+            } else {
+                outPath = Paths.get(outputFilePath + ".mp3");
+            }
+
+            outputFilePath = outPath.toAbsolutePath().toString();
+        }
+
 
         List<String> cmd = new ArrayList<>();
-        cmd.add("ffmpeg");
+        cmd.add(ffmpegCmdResolved);
         cmd.add("-y");
         for (String in : inputs) {
             cmd.add("-i");
             cmd.add(in);
         }
 
-        // build filter_complex
+        // Build filter_complex that normalizes each input to stereo 44100 and then concat
+        // Example: [0:0]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo[a0];
+        //          [1:0]aformat=... [a1]; [a0][a1]concat=n=2:v=0:a=1[out]
         StringBuilder fb = new StringBuilder();
         for (int i = 0; i < inputs.size(); i++) {
-            fb.append("[").append(i).append(":0]");
+            fb.append("[").append(i).append(":0]").append("aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo")
+                    .append("[a").append(i).append("];");
         }
-        int n = inputs.size();
-        fb.append("concat=n=").append(n).append(":v=0:a=1[out]");
+        for (int i = 0; i < inputs.size(); i++) {
+            fb.append("[a").append(i).append("]");
+        }
+        fb.append("concat=n=").append(inputs.size()).append(":v=0:a=1[out]");
 
         cmd.add("-filter_complex");
         cmd.add(fb.toString());
@@ -248,13 +350,13 @@ public class TtsServiceImpl implements TtsService {
 
         ProcessBuilder pb = new ProcessBuilder(cmd);
         if (workingDir != null) pb.directory(workingDir.toFile());
-        pb.redirectErrorStream(false); // đọc riêng stdout và stderr
+        pb.redirectErrorStream(false);
 
         Process p;
         try {
             p = pb.start();
         } catch (IOException e) {
-            throw new RuntimeException("Không thể khởi chạy ffmpeg. Hãy kiểm tra ffmpeg đã cài và có trong PATH chưa. Chi tiết: " + e.getMessage(), e);
+            throw new RuntimeException("Không thể khởi chạy ffmpeg. Chi tiết: " + e.getMessage(), e);
         }
 
         StringBuilder outLog = new StringBuilder();
@@ -262,11 +364,9 @@ public class TtsServiceImpl implements TtsService {
 
         Thread tOut = new Thread(new StreamGobbler(p.getInputStream(), line -> {
             outLog.append(line).append(System.lineSeparator());
-            // optional: System.out.println(line);
         }));
         Thread tErr = new Thread(new StreamGobbler(p.getErrorStream(), line -> {
             errLog.append(line).append(System.lineSeparator());
-            // optional: System.err.println(line);
         }));
         tOut.start();
         tErr.start();
@@ -289,4 +389,5 @@ public class TtsServiceImpl implements TtsService {
 
         return outputFilePath;
     }
+
 }
