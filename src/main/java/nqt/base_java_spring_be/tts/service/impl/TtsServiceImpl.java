@@ -179,159 +179,144 @@ public class TtsServiceImpl implements TtsService {
         wordsRepository.saveAll(words);
     }
 
-    @Override
-    public TextToMp3Result textToMp3(TextToMp3Request req){
-        String sentence = req.getWord().toLowerCase()
-//                ,  outputFilePath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
-                , outputFilePath = "D:/BackUp Db/word";
-        if (sentence == null || sentence.trim().isEmpty()) {
-            throw new IllegalArgumentException("Câu nhập vào rỗng");
-        }
-        List<String> words = splitToWords(sentence);
-        if (words.isEmpty()) {
-            throw new IllegalArgumentException("Không tìm thấy từ hợp lệ trong câu");
-        }
+    private Path createSilenceMp3File(Double durationSec) {
+        if (durationSec == null || durationSec <= 0) return null;
 
-        List<String> tokens = splitToTokens(sentence, req.getPauses());
-        List<String> notFoundWords = new ArrayList<>();
-        List<String> inputFiles = new ArrayList<>();
-
-        for (String t : tokens) {
-
-            // nếu là Pause → tạo silence file
-            if (t.startsWith("PAUSE:")) {
-                Double sec = Double.parseDouble(t.substring(6));
-                String silence = createSilenceMp3Dynamic(sec);
-                if (silence != null) inputFiles.add(silence);
-                continue;
-            }
-
-            // nếu là từ → tìm mp3 trong DB
-            Optional<Words> opt = wordsRepository.findActiveByName(t);
-            if (opt.isPresent()) {
-                inputFiles.add(opt.get().getPath());
-            } else {
-                notFoundWords.add(t);
-                System.out.println("Không tìm thấy từ: " + t);
-                Optional<Words> existed = wordsRepository.findFirstByNameIgnoreCase(t);
-                if (existed.isEmpty()) {
-                    Words w = Words.builder()
-                            .fullName(t)
-                            .name(t)
-                            .type("")
-                            .path("")
-                            .build();
-                    w.setActive(false);
-
-                    wordsRepository.save(w);
-                    System.out.println("Đã thêm từ mới với trạng thái inactive: " + t);
-                } else {
-                    System.out.println("Từ đã tồn tại trong DB (inactive), không thêm mới: " + t);
-                }
-            }
-        }
-
-        if (inputFiles.isEmpty()) {
-            throw new IllegalStateException("Không có file mp3 nào tương ứng với các từ trong câu");
-        }
-        Path tmpDir;
-        try {
-            tmpDir = Files.createTempDirectory("concat_mp3_");
-        } catch (IOException e) {
-            throw new RuntimeException("Không thể tạo thư mục tạm", e);
-        }
-        tmpDir.toFile().deleteOnExit();
-
-        // 4) Tạo file bằng ffmpeg (stereo 44.1k)
-        Path silenceFile = tmpDir.resolve("silence_0_3s.mp3");
-        createSilenceMp3(silenceFile.toString(), req.getPauses());
-
-        // 5) Lập danh sách đầu vào: word1.mp3, silence.mp3, word2.mp3, silence.mp3, ...
-        List<String> orderedFiles = new ArrayList<>();
-        for (int i = 0; i < inputFiles.size(); i++) {
-            orderedFiles.add(inputFiles.get(i));
-            if (i < inputFiles.size() - 1) {
-                orderedFiles.add(silenceFile.toString());
-            }
-        }
-
-        // tạo đường dẫn file output tạm
-        Path outMp3 = tmpDir.resolve("tts_output.mp3");
-
-        String resultPath  = performFfmpegConcatFilterComplex(orderedFiles, outputFilePath, tmpDir);
-
-        try {
-            // đọc file mp3 ra byte[]
-            byte[] audio = Files.readAllBytes(Paths.get(resultPath));
-            return new TextToMp3Result(audio, notFoundWords);
-        } catch (IOException e) {
-            throw new RuntimeException("Không thể đọc file mp3 kết quả", e);
-        } finally {
-            // cleanup tạm: xóa files trong tmpDir (improve: log nếu xóa thất bại)
-            try {
-                Files.deleteIfExists(silenceFile);
-                Files.deleteIfExists(Paths.get(resultPath));
-                Files.deleteIfExists(tmpDir);
-            } catch (Exception ignored) {}
-        }
-    }
-
-    private List<String> splitToWords(String sentence) {
-        // tách bằng whitespace, sau đó trim các ký tự không phải chữ/số ở đầu và cuối
-        String[] parts = sentence.trim().split("\\s+");
-        List<String> out = new ArrayList<>();
-        for (String p : parts) {
-            // loại bỏ ký tự không phải chữ/số ở đầu hoặc cuối (đảm bảo hỗ trợ unicode)
-            String w = p.replaceAll("^[^\\p{L}\\p{N}]+|[^\\p{L}\\p{N}]+$", "");
-            if (!w.isEmpty()) {
-                out.add(w);
-            }
-        }
-        return out;
-    }
-
-    private void createSilenceMp3(String silencePath, TextToMp3Request.PauseConfig pauses) {
         if (ffmpegCmdResolved == null) {
             throw new IllegalStateException("ffmpeg not available. Configure app.tts.ffmpeg-path or add ffmpeg to PATH and restart.");
         }
 
-        List<String> cmd = Arrays.asList(
-                ffmpegCmdResolved, "-y",
-                "-f", "lavfi",
-                "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                "-t", String.valueOf(pauses.getWordPause()),
-                "-q:a", "9",
-                silencePath
-        );
-
-        ProcessBuilder pb = new ProcessBuilder(cmd);
-        pb.redirectErrorStream(true);
-        Process p;
         try {
-            p = pb.start();
-        } catch (IOException e) {
-            throw new RuntimeException("Không thể khởi chạy ffmpeg. Hãy kiểm tra ffmpeg đã cài và có trong PATH chưa.", e);
-        }
+            // Sử dụng file tạm có đuôi .mp3 để FFmpeg không nhầm lẫn
+            Path tmpFile = Files.createTempFile("sil_", ".mp3");
+            tmpFile.toFile().deleteOnExit(); // Đánh dấu xóa khi JVM thoát
 
-        // đọc output (tránh block)
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-            String line;
-            while ((line = br.readLine()) != null) {
-                // optional logging
-            }
-        } catch (IOException e) {
-            // lỗi đọc luồng output
-            throw new RuntimeException("Lỗi đọc output của ffmpeg", e);
-        }
+            List<String> cmd = Arrays.asList(
+                    ffmpegCmdResolved, "-y",
+                    "-f", "lavfi",
+                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                    "-t", String.valueOf(durationSec),
+                    "-q:a", "9",
+                    tmpFile.toAbsolutePath().toString()
+            );
 
-        try {
+            // Tái sử dụng logic thực thi FFmpeg (tạo hàm runFfmpegCommand nếu cần)
+            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
             int rc = p.waitFor();
+
             if (rc != 0) {
-                throw new RuntimeException("ffmpeg exit code " + rc);
+                // Đảm bảo xóa file tạm nếu tạo thất bại
+                Files.deleteIfExists(tmpFile);
+                throw new RuntimeException("ffmpeg exit code " + rc + " khi tạo silence.");
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Quá trình ffmpeg bị interrupt", e);
+
+            return tmpFile;
+        } catch (Exception e) {
+            throw new RuntimeException("Lỗi tạo silence với độ dài " + durationSec + " giây", e);
+        }
+    }
+
+    private void handleNotFoundWord(String word) {
+        System.out.println("Không tìm thấy từ: " + word);
+        Optional<Words> existed = wordsRepository.findFirstByNameIgnoreCase(word);
+        if (existed.isEmpty()) {
+            Words w = Words.builder()
+                    .fullName(word)
+                    .name(word)
+                    .type("")
+                    .path("")
+                    .build();
+            w.setActive(false);
+
+            wordsRepository.save(w);
+            System.out.println("Đã thêm từ mới với trạng thái inactive: " + word);
+        } else {
+            System.out.println("Từ đã tồn tại trong DB (inactive), không thêm mới: " + word);
+        }
+    }
+
+    @Override
+    public TextToMp3Result textToMp3(TextToMp3Request req){
+        String sentence = req.getWord().toLowerCase();
+        // Lấy đường dẫn cơ sở, nên là 1 biến hằng hoặc config.
+        String baseOutputPath = "D:/BackUp Db/word";
+
+        if (sentence == null || sentence.trim().isEmpty()) {
+            throw new IllegalArgumentException("Câu nhập vào rỗng");
+        }
+
+        List<String> tokens = splitToTokens(sentence, req.getPauses());
+        if (tokens.isEmpty()) {
+            throw new IllegalArgumentException("Không tìm thấy từ hợp lệ hoặc dấu câu để tạo token");
+        }
+
+        List<String> notFoundWords = new ArrayList<>();
+        List<String> inputFiles = new ArrayList<>();
+
+        // Sử dụng Set để lưu trữ các file silence tạm cần xóa
+        Set<Path> tempSilenceFiles = new HashSet<>();
+
+        Path tmpDir = null; // Khởi tạo bên ngoài try để cleanup
+
+        try {
+            // 1. Chuẩn bị thư mục tạm và file silence mặc định
+            tmpDir = Paths.get(baseOutputPath); // Giữ nguyên cách sử dụng dir này theo code gốc
+            Files.createDirectories(tmpDir);
+
+            // 2. Thu thập Input Files và tạo file Silence động
+            for (String t : tokens) {
+                // A) Nếu là Pause → tạo silence file
+                if (t.startsWith("PAUSE:")) {
+                    Double sec = Double.parseDouble(t.substring(6));
+                    Path silenceFile = createSilenceMp3File(sec);
+                    if (silenceFile != null) {
+                        inputFiles.add(silenceFile.toAbsolutePath().toString());
+                        tempSilenceFiles.add(silenceFile);
+                    }
+                    continue;
+                }
+
+                // B) Nếu là từ → tìm mp3 trong DB
+                Optional<Words> opt = wordsRepository.findActiveByName(t);
+                if (opt.isPresent()) {
+                    inputFiles.add(opt.get().getPath());
+                } else {
+                    notFoundWords.add(t);
+                    // *Refactor: Tách logic xử lý từ không tìm thấy thành hàm riêng*
+                    handleNotFoundWord(t);
+                }
+            }
+
+            if (inputFiles.isEmpty()) {
+                throw new IllegalStateException("Không có file mp3 nào tương ứng với các từ trong câu");
+            }
+
+            // 3. Xử lý Output Path
+            // Tạo tên file đầu ra duy nhất trong thư mục tmpDir/baseOutputPath
+            String resultFileName = "tts_" + LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")) + ".mp3";
+            String resultPath = tmpDir.resolve(resultFileName).toAbsolutePath().toString();
+
+            // 4. Ghép file bằng FFmpeg
+            performFfmpegConcatFilterComplex(inputFiles, resultPath, tmpDir);
+
+            // 5. Đọc kết quả và trả về
+            byte[] audio = Files.readAllBytes(Paths.get(resultPath));
+            return new TextToMp3Result(audio, notFoundWords);
+        } catch (IOException e) {
+            throw new RuntimeException("Lỗi I/O trong quá trình tạo/đọc file MP3", e);
+        } finally {
+            // 6. Dọn dẹp: Xóa tất cả các file silence tạm đã tạo
+            for (Path p : tempSilenceFiles) {
+                try {
+                    Files.deleteIfExists(p);
+                } catch (Exception ignored) {
+                    System.err.println("Không thể xóa file tạm: " + p);
+                }
+            }
+
+            // *Lưu ý: Bạn đã thay đổi logic để tạo output file trong tmpDir, nên cần xóa file output nếu không muốn lưu*
+            // Giả định: File kết quả (resultPath) được tạo trong D:/BackUp Db/word và được LƯU LẠI
         }
     }
 
@@ -382,37 +367,6 @@ public class TtsServiceImpl implements TtsService {
 
         return tokens;
     }
-
-    private String createSilenceMp3Dynamic(Double durationSec) {
-        if (durationSec == null || durationSec <= 0) return null;
-
-        if (ffmpegCmdResolved == null) {
-            throw new IllegalStateException("ffmpeg not available");
-        }
-
-        try {
-            Path tmpFile = Files.createTempFile("sil_", ".mp3");
-            String output = tmpFile.toAbsolutePath().toString();
-
-            List<String> cmd = Arrays.asList(
-                    ffmpegCmdResolved, "-y",
-                    "-f", "lavfi",
-                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                    "-t", String.valueOf(durationSec),
-                    "-q:a", "9",
-                    output
-            );
-
-            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-            p.waitFor();
-
-            return output;
-
-        } catch (Exception e) {
-            throw new RuntimeException("Lỗi tạo silence với độ dài " + durationSec + " giây", e);
-        }
-    }
-
 
     private String performFfmpegConcatFilterComplex(List<String> inputs, String outputFilePath, Path workingDir) {
         if (inputs == null || inputs.isEmpty()) {
