@@ -3,11 +3,6 @@ package nqt.base_java_spring_be.entity;
 import jakarta.persistence.*;
 import lombok.*;
 import lombok.experimental.FieldDefaults;
-import nqt.base_java_spring_be.enums.ProjectStatus;
-
-import java.math.BigDecimal;
-import java.time.LocalDate;
-import java.util.List;
 import java.util.UUID;
 
 @Entity

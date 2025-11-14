@@ -7,6 +7,7 @@ import nqt.base_java_spring_be.dto.CustomResponse;
 import nqt.base_java_spring_be.dto.request.ProjectCreateRequest;
 import nqt.base_java_spring_be.entity.Project;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Request;
+import nqt.base_java_spring_be.tts.dto.TextToMp3Result;
 import nqt.base_java_spring_be.tts.service.iservices.TtsService;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -70,7 +71,7 @@ public class TtsController {
     @PostMapping("/vi/text-to-mp3")
     public ResponseEntity<CustomResponse<?>> textToMp3(@Valid @RequestBody TextToMp3Request req) {
         try {
-            byte[] data = tts.textToMp3(req);
+            TextToMp3Result data = tts.textToMp3(req);
             return ResponseEntity.ok(CustomResponse.success(data, "Thành công"));
         } catch (IllegalArgumentException e) {
             // lỗi đầu vào -> 400
