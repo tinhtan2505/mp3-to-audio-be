@@ -4,7 +4,6 @@ import nqt.base_java_spring_be.tts.dto.TextToMp3Request;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Result;
 
 public interface TtsService {
-    byte[] synthesizeOneWordVi(String word);
     void insertWords();
     TextToMp3Result textToMp3(TextToMp3Request req);
 }

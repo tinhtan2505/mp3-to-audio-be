@@ -29,29 +29,6 @@ public class TtsController {
         this.tts = tts;
     }
 
-    @GetMapping(value = "/vi", produces = "audio/mpeg")
-    public ResponseEntity<byte[]> speakOneVi(@RequestParam @NotBlank String word) {
-        try {
-            byte[] mp3 = tts.synthesizeOneWordVi(word);
-            if (mp3 == null || mp3.length == 0) {
-                throw new IllegalStateException("Không tạo được audio (mp3 rỗng).");
-            }
-            String suggestedName = word.replaceAll("[^\\p{L}\\p{N}_-]", "_") + ".mp3";
-            return ResponseEntity.ok()
-                    .contentType(MediaType.valueOf("audio/mpeg"))
-                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + suggestedName + "\"")
-                    .body(mp3);
-        } catch (IllegalArgumentException e) {
-            // lỗi đầu vào -> 400
-            log.warn("Bad request /api/tts/vi word='{}': {}", word, e.getMessage());
-            throw e;
-        } catch (Exception e) {
-            // lỗi hệ thống -> 500
-            log.error("TTS failed for word='{}'", word, e);
-            throw new RuntimeException("Tạo âm thanh thất bại: " + e.getMessage(), e);
-        }
-    }
-
     @PostMapping("/vi/insert-words")
     public ResponseEntity<CustomResponse<?>> insertWords() {
         try {
