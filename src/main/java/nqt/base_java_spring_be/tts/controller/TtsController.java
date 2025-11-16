@@ -10,6 +10,7 @@ import nqt.base_java_spring_be.tts.dto.TextToMp3Request;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Result;
 import nqt.base_java_spring_be.tts.service.iservices.TtsService;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
@@ -49,15 +50,18 @@ public class TtsController {
     public ResponseEntity<CustomResponse<?>> textToMp3(@Valid @RequestBody TextToMp3Request req) {
         try {
             TextToMp3Result data = tts.textToMp3(req);
-            return ResponseEntity.ok(CustomResponse.success(data, "Thành công"));
+
+            CustomResponse<TextToMp3Result> responseBody = CustomResponse.success(data, "Chuyển văn bản thành MP3 thành công");
+            return ResponseEntity.ok(responseBody);
+
         } catch (IllegalArgumentException e) {
-            // lỗi đầu vào -> 400
-            log.warn(e.getMessage());
-            throw e;
+            CustomResponse<?> responseBody = CustomResponse.error(e.getMessage(), HttpStatus.BAD_REQUEST);
+            return ResponseEntity.badRequest().body(responseBody);
+
         } catch (Exception e) {
-            // lỗi hệ thống -> 500
-            log.error("TTS failed for word='", e);
-            throw new RuntimeException("Thất bại: " + e.getMessage(), e);
+
+            CustomResponse<?> responseBody = CustomResponse.error("Lỗi hệ thống: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(responseBody);
         }
     }
 }

@@ -26,8 +26,8 @@ public class CustomResponse<T> {
     }
 
     // Factory method for error response
-    public static <T> CustomResponse<T> error(String message, int status) {
-        return new CustomResponse<>(message, status, null);
+    public static <T> CustomResponse<T> error(String message, HttpStatus status) {
+        return new CustomResponse<>(message, status.value(), null);
     }
 
     @Override

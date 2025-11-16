@@ -204,8 +204,8 @@ public class TtsServiceImpl implements TtsService {
     @Override
     public TextToMp3Result textToMp3(TextToMp3Request req){
         String sentence = req.getWord().toLowerCase();
-        // Lấy đường dẫn cơ sở, nên là 1 biến hằng hoặc config.
-        String baseOutputPath = "D:/BackUp Db/word";
+//        String baseOutputPath = "D:/BackUp Db/word";
+        String baseOutputPath = "D:/My Project/MP3_TO_AUDIO/mp3-output";
 
         if (sentence == null || sentence.trim().isEmpty()) {
             throw new IllegalArgumentException("Câu nhập vào rỗng");
