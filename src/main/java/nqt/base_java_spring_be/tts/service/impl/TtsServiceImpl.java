@@ -25,19 +25,13 @@ import java.util.*;
 public class TtsServiceImpl implements TtsService {
     private final String configuredFfmpegPath;
     private String ffmpegCmdResolved;
-
-    private final AzureTtsClient client;
-    private final String storageDir;
+    private static final int MAX_SEARCH_WORDS = 2;
 
     private final WordsRepository wordsRepository;
 
     public TtsServiceImpl(
-            AzureTtsClient client,
-            @Value("${app.tts.storage-dir:}") String storageDir,
-            @Value("${app.tts.ffmpeg-path:}") String ffmpegPath, // <-- add this
+            @Value("${app.tts.ffmpeg-path:}") String ffmpegPath,
             WordsRepository wordsRepository) {
-        this.client = client;
-        this.storageDir = storageDir == null ? "" : storageDir.trim();
         this.wordsRepository = wordsRepository;
         this.configuredFfmpegPath = ffmpegPath == null ? "" : ffmpegPath.trim();
     }
@@ -201,6 +195,117 @@ public class TtsServiceImpl implements TtsService {
         }
     }
 
+        if (sentence == null || sentence.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        List<String> tokens = new ArrayList<>();
+        String remainingSentence = sentence.toLowerCase(); // Giữ nguyên case ban đầu cho việc cắt chuỗi, nhưng tìm kiếm bằng lowercase
+
+        while (!remainingSentence.isEmpty()) {
+            int originalLength = remainingSentence.length();
+
+            // 1. Bỏ qua khoảng trắng đầu tiên
+            remainingSentence = remainingSentence.trim();
+            if (remainingSentence.isEmpty()) break;
+
+            char firstChar = remainingSentence.charAt(0);
+
+            // 2. Xử lý Dấu Câu (tạo PAUSE)
+            if (!Character.isLetterOrDigit(firstChar) && firstChar != '\'' && firstChar != '’') {
+                Double pauseSec = null;
+
+                switch (firstChar) {
+//                    case ' ': pauseSec = pauses.getWordPause(); break;
+                    case '.': pauseSec = pauses.getDotPause(); break;
+                    case ',': pauseSec = pauses.getCommaPause(); break;
+                    case ';': pauseSec = pauses.getSemicolonPause(); break;
+                    case ':': pauseSec = pauses.getColonPause(); break;
+                    case '?': pauseSec = pauses.getQuestionPause(); break;
+                    case '!': pauseSec = pauses.getExclamationPause(); break;
+                    case '\n': case '\r': pauseSec = pauses.getLineBreakPause(); break;
+                    case '(': case ')': case '"': case '“': case '”': pauseSec = pauses.getParenthesisPause(); break;
+                    default: break;
+                }
+
+                if (pauseSec != null && pauseSec > 0) {
+                    tokens.add("PAUSE:" + pauseSec);
+                }
+
+                // Di chuyển qua ký tự dấu câu đã xử lý
+                remainingSentence = remainingSentence.substring(1).trim();
+                continue;
+            }
+
+            // 3. Xử lý Từ/Từ Ghép
+
+            // Tìm vị trí của khoảng trắng hoặc dấu câu đầu tiên để xác định giới hạn từ/cụm từ
+            int wordEndIndex = remainingSentence.length();
+            for (int i = 0; i < remainingSentence.length(); i++) {
+                char c = remainingSentence.charAt(i);
+                if (!Character.isLetterOrDigit(c) && c != '\'' && c != '’' && c != ' ') {
+                    wordEndIndex = i;
+                    break;
+                }
+            }
+
+            // Phần chuỗi chỉ chứa từ và khoảng trắng
+            String currentWordChunk = remainingSentence.substring(0, wordEndIndex).trim();
+            String[] parts = currentWordChunk.split("\\s+");
+
+            String wordToken = null;
+            int wordLengthInChars = 0; // Chiều dài của token (bao gồm khoảng trắng)
+
+            // 3a. Ưu tiên tìm Từ Ghép
+            for (int n = Math.min(MAX_SEARCH_WORDS, parts.length); n >= 2; n--) {
+                String multiWordCandidate = String.join(" ", Arrays.copyOfRange(parts, 0, n));
+                Optional<Words> opt = wordsRepository.findActiveByName(multiWordCandidate);
+
+                if (opt.isPresent()) {
+                    wordToken = multiWordCandidate;
+                    wordLengthInChars = multiWordCandidate.length();
+                    // Đảm bảo token được cắt đúng với khoảng trắng theo sau
+                    java.util.regex.Pattern p = java.util.regex.Pattern.compile("^" + java.util.regex.Pattern.quote(wordToken) + "\\s*");
+                    java.util.regex.Matcher m = p.matcher(remainingSentence);
+                    if(m.find()) {
+                        wordLengthInChars = m.end();
+                    }
+                    break;
+                }
+            }
+
+            // 3b. Nếu không tìm thấy từ ghép, lấy từ đơn đầu tiên
+            if (wordToken == null && parts.length > 0) {
+                wordToken = parts[0];
+                // Chiều dài từ đơn (cộng khoảng trắng sau nếu có)
+                java.util.regex.Pattern p = java.util.regex.Pattern.compile("^" + java.util.regex.Pattern.quote(wordToken) + "\\s*");
+                java.util.regex.Matcher m = p.matcher(remainingSentence);
+                if(m.find()) {
+                    wordLengthInChars = m.end();
+                } else {
+                    wordLengthInChars = wordToken.length();
+                }
+            }
+
+            // 3c. Thêm token từ/từ ghép đã tìm thấy
+            if (wordToken != null && !wordToken.isBlank()) {
+                tokens.add(wordToken);
+                remainingSentence = remainingSentence.substring(wordLengthInChars).trim();
+            } else {
+                // Nếu không tìm thấy từ nào và còn ký tự không phải dấu câu/khoảng trắng, thoát
+                remainingSentence = remainingSentence.substring(1).trim();
+            }
+
+            // Guardrail chống vòng lặp vô hạn
+            if (remainingSentence.length() == originalLength) {
+                System.err.println("Lỗi phân tích cú pháp: Không thể tiến triển từ: " + remainingSentence);
+                break;
+            }
+        }
+
+        return tokens;
+    }
+
     @Override
     public TextToMp3Result textToMp3(TextToMp3Request req){
         String sentence = req.getWord().toLowerCase();
@@ -211,7 +316,9 @@ public class TtsServiceImpl implements TtsService {
             throw new IllegalArgumentException("Câu nhập vào rỗng");
         }
 
+//        List<String> tokens = tokenizeAndSegmentSentence(sentence, req.getPauses());
         List<String> tokens = splitToTokens(sentence, req.getPauses());
+
         if (tokens.isEmpty()) {
             throw new IllegalArgumentException("Không tìm thấy từ hợp lệ hoặc dấu câu để tạo token");
         }
