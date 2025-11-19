@@ -20,6 +20,8 @@ import java.security.MessageDigest;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service
 public class TtsServiceImpl implements TtsService {
@@ -194,117 +196,116 @@ public class TtsServiceImpl implements TtsService {
             System.out.println("Từ đã tồn tại trong DB (inactive), không thêm mới: " + word);
         }
     }
+
     private List<String> tokenizeAndSegmentSentence(String sentence, TextToMp3Request.PauseConfig pauses) {
         if (sentence == null || sentence.isBlank()) {
             return Collections.emptyList();
         }
 
         List<String> tokens = new ArrayList<>();
-        String remainingSentence = sentence.toLowerCase(); // Giữ nguyên case ban đầu cho việc cắt chuỗi, nhưng tìm kiếm bằng lowercase
+        String remainingSentence = sentence; // KHÔNG lowercase để giữ nguyên dấu & spacing
 
         while (!remainingSentence.isEmpty()) {
             int originalLength = remainingSentence.length();
-
-            // 1. Bỏ qua khoảng trắng đầu tiên
-            remainingSentence = remainingSentence.trim();
-            if (remainingSentence.isEmpty()) break;
-
             char firstChar = remainingSentence.charAt(0);
 
-            // 2. Xử lý Dấu Câu (tạo PAUSE)
-            if (!Character.isLetterOrDigit(firstChar) && firstChar != '\'' && firstChar != '’') {
-                Double pauseSec = null;
-
-                switch (firstChar) {
-                    case ' ': pauseSec = pauses.getWordPause(); break;
-                    case '.': pauseSec = pauses.getDotPause(); break;
-                    case ',': pauseSec = pauses.getCommaPause(); break;
-                    case ';': pauseSec = pauses.getSemicolonPause(); break;
-                    case ':': pauseSec = pauses.getColonPause(); break;
-                    case '?': pauseSec = pauses.getQuestionPause(); break;
-                    case '!': pauseSec = pauses.getExclamationPause(); break;
-                    case '\n': case '\r': pauseSec = pauses.getLineBreakPause(); break;
-                    case '(': case ')': case '"': case '“': case '”': pauseSec = pauses.getParenthesisPause(); break;
-                    default: break;
-                }
-
-                if (pauseSec != null && pauseSec > 0) {
-                    tokens.add("PAUSE:" + pauseSec);
-                }
-
-                // Di chuyển qua ký tự dấu câu đã xử lý
-                remainingSentence = remainingSentence.substring(1).trim();
+            // 1. Nếu là khoảng trắng → tạo PAUSE từ wordPause
+            if (firstChar == ' ') {
+                double pause = pauses.getWordPause();
+                if (pause > 0) tokens.add("PAUSE:" + pause);
+                remainingSentence = remainingSentence.substring(1);
                 continue;
             }
 
-            // 3. Xử lý Từ/Từ Ghép
+            // 2. Nếu là dấu câu → tạo PAUSE như splitToTokens()
+            Double pauseSec = null;
 
-            // Tìm vị trí của khoảng trắng hoặc dấu câu đầu tiên để xác định giới hạn từ/cụm từ
-            int wordEndIndex = remainingSentence.length();
-            for (int i = 0; i < remainingSentence.length(); i++) {
-                char c = remainingSentence.charAt(i);
-                if (!Character.isLetterOrDigit(c) && c != '\'' && c != '’' && c != ' ') {
-                    wordEndIndex = i;
-                    break;
-                }
+            switch (firstChar) {
+//                case ' ': pauseSec = pauses.getWordPause(); break;
+                case '.': pauseSec = pauses.getDotPause(); break;
+                case ',': pauseSec = pauses.getCommaPause(); break;
+                case ';': pauseSec = pauses.getSemicolonPause(); break;
+                case ':': pauseSec = pauses.getColonPause(); break;
+                case '?': pauseSec = pauses.getQuestionPause(); break;
+                case '!': pauseSec = pauses.getExclamationPause(); break;
+                case '\n':
+                case '\r': pauseSec = pauses.getLineBreakPause(); break;
+                case '(':
+                case ')':
+                case '"':
+                case '“':
+                case '”': pauseSec = pauses.getParenthesisPause(); break;
             }
 
-            // Phần chuỗi chỉ chứa từ và khoảng trắng
-            String currentWordChunk = remainingSentence.substring(0, wordEndIndex).trim();
-            String[] parts = currentWordChunk.split("\\s+");
+            if (pauseSec != null && pauseSec > 0) {
+                tokens.add("PAUSE:" + pauseSec);
+                remainingSentence = remainingSentence.substring(1);
+                continue;
+            }
 
-            String wordToken = null;
-            int wordLengthInChars = 0; // Chiều dài của token (bao gồm khoảng trắng)
+            // 3. Nếu bắt đầu bằng ký tự là chữ → xử lý từ / từ ghép
+            if (Character.isLetterOrDigit(firstChar) || firstChar == '\'' || firstChar == '’') {
 
-            // 3a. Ưu tiên tìm Từ Ghép
-            for (int n = Math.min(MAX_SEARCH_WORDS, parts.length); n >= 2; n--) {
-                String multiWordCandidate = String.join(" ", Arrays.copyOfRange(parts, 0, n));
-                Optional<Words> opt = wordsRepository.findActiveByName(multiWordCandidate);
-
-                if (opt.isPresent()) {
-                    wordToken = multiWordCandidate;
-                    wordLengthInChars = multiWordCandidate.length();
-                    // Đảm bảo token được cắt đúng với khoảng trắng theo sau
-                    java.util.regex.Pattern p = java.util.regex.Pattern.compile("^" + java.util.regex.Pattern.quote(wordToken) + "\\s*");
-                    java.util.regex.Matcher m = p.matcher(remainingSentence);
-                    if(m.find()) {
-                        wordLengthInChars = m.end();
+                // Tìm wordEndIndex
+                int wordEndIndex = remainingSentence.length();
+                for (int i = 0; i < remainingSentence.length(); i++) {
+                    char c = remainingSentence.charAt(i);
+                    if (!Character.isLetterOrDigit(c) && c != '\'' && c != '’' && c != ' ') {
+                        wordEndIndex = i;
+                        break;
                     }
-                    break;
                 }
-            }
 
-            // 3b. Nếu không tìm thấy từ ghép, lấy từ đơn đầu tiên
-            if (wordToken == null && parts.length > 0) {
-                wordToken = parts[0];
-                // Chiều dài từ đơn (cộng khoảng trắng sau nếu có)
-                java.util.regex.Pattern p = java.util.regex.Pattern.compile("^" + java.util.regex.Pattern.quote(wordToken) + "\\s*");
-                java.util.regex.Matcher m = p.matcher(remainingSentence);
-                if(m.find()) {
-                    wordLengthInChars = m.end();
-                } else {
-                    wordLengthInChars = wordToken.length();
+                String chunk = remainingSentence.substring(0, wordEndIndex);
+                String[] parts = chunk.trim().split("\\s+");
+
+                String wordToken = null;
+                int tokenLength = 0;
+
+                // 3a. Tìm từ ghép
+                for (int n = Math.min(MAX_SEARCH_WORDS, parts.length); n >= 2; n--) {
+                    String candidate = String.join(" ", Arrays.copyOfRange(parts, 0, n));
+                    Optional<Words> opt = wordsRepository.findActiveByName(candidate.toLowerCase());
+                    if (opt.isPresent()) {
+                        wordToken = candidate;
+
+                        // Tính chiều dài thực sự bao gồm khoảng trắng sau
+                        Pattern p = Pattern.compile("^" + Pattern.quote(candidate));
+
+                        Matcher m = p.matcher(remainingSentence);
+                        if (m.find()) tokenLength = m.end();
+                        break;
+                    }
                 }
-            }
 
-            // 3c. Thêm token từ/từ ghép đã tìm thấy
-            if (wordToken != null && !wordToken.isBlank()) {
+                // 3b. Nếu không có từ ghép → lấy từ đơn
+                if (wordToken == null) {
+                    wordToken = parts[0];
+
+                    Pattern p = Pattern.compile("^" + Pattern.quote(wordToken));
+                    Matcher m = p.matcher(remainingSentence);
+                    if (m.find()) tokenLength = m.end();
+                    else tokenLength = wordToken.length();
+                }
+
+                // Thêm token
                 tokens.add(wordToken);
-                remainingSentence = remainingSentence.substring(wordLengthInChars).trim();
-            } else {
-                // Nếu không tìm thấy từ nào và còn ký tự không phải dấu câu/khoảng trắng, thoát
-                remainingSentence = remainingSentence.substring(1).trim();
+                remainingSentence = remainingSentence.substring(tokenLength);
+                continue;
             }
 
-            // Guardrail chống vòng lặp vô hạn
+            // 4. Nếu không thuộc loại nào → bỏ qua 1 ký tự
+            remainingSentence = remainingSentence.substring(1);
+
+            // Chống infinite loop
             if (remainingSentence.length() == originalLength) {
-                System.err.println("Lỗi phân tích cú pháp: Không thể tiến triển từ: " + remainingSentence);
                 break;
             }
         }
 
         return tokens;
     }
+
 
     @Override
     public TextToMp3Result textToMp3(TextToMp3Request req){
