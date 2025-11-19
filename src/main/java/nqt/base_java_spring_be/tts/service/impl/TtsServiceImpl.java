@@ -100,7 +100,7 @@ public class TtsServiceImpl implements TtsService {
 
     public void insertWords(){
 //        String directoryPath = "D:/My Project/MP3_TO_AUDIO/mp3";
-        String directoryPath = "D:/BackUp Db/work";
+        String directoryPath = "D:/BackUp Db/work1";
         List<String> mp3Files = new ArrayList<>();
         File folder = new File(directoryPath);
 
@@ -194,7 +194,7 @@ public class TtsServiceImpl implements TtsService {
             System.out.println("Từ đã tồn tại trong DB (inactive), không thêm mới: " + word);
         }
     }
-
+    private List<String> tokenizeAndSegmentSentence(String sentence, TextToMp3Request.PauseConfig pauses) {
         if (sentence == null || sentence.isBlank()) {
             return Collections.emptyList();
         }
@@ -216,7 +216,7 @@ public class TtsServiceImpl implements TtsService {
                 Double pauseSec = null;
 
                 switch (firstChar) {
-//                    case ' ': pauseSec = pauses.getWordPause(); break;
+                    case ' ': pauseSec = pauses.getWordPause(); break;
                     case '.': pauseSec = pauses.getDotPause(); break;
                     case ',': pauseSec = pauses.getCommaPause(); break;
                     case ';': pauseSec = pauses.getSemicolonPause(); break;
@@ -316,8 +316,8 @@ public class TtsServiceImpl implements TtsService {
             throw new IllegalArgumentException("Câu nhập vào rỗng");
         }
 
-//        List<String> tokens = tokenizeAndSegmentSentence(sentence, req.getPauses());
-        List<String> tokens = splitToTokens(sentence, req.getPauses());
+        List<String> tokens = tokenizeAndSegmentSentence(sentence, req.getPauses());
+        List<String> tokens1 = splitToTokens(sentence, req.getPauses());
 
         if (tokens.isEmpty()) {
             throw new IllegalArgumentException("Không tìm thấy từ hợp lệ hoặc dấu câu để tạo token");
