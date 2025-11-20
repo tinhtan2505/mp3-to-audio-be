@@ -26,7 +26,7 @@ public class TtsServiceImpl implements TtsService {
     private final String configuredFfmpegPath;
     private String ffmpegCmdResolved;
     private static final int MAX_SEARCH_WORDS = 2;
-    private static final double COMPOUND_WORD_SPLIT_PAUSE_SEC = 0.0;
+    private static final double COMPOUND_WORD_SPLIT_PAUSE_SEC = 0.01;
 
     private final WordsRepository wordsRepository;
 
