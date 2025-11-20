@@ -101,7 +101,7 @@ public class TtsServiceImpl implements TtsService {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
-    private Path createSilenceMp3File(Double durationSec) {
+    private Path createSilenceWavFile(Double durationSec) {
         if (durationSec == null || durationSec <= 0) return null;
 
         if (ffmpegCmdResolved == null) {
@@ -153,7 +153,8 @@ public class TtsServiceImpl implements TtsService {
         Path outputPath = tempDir.resolve(outputFileName);
 
         // Filter:
-        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0:stop_threshold=-50dB";
+//        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0:stop_threshold=-50dB";
+        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.1:stop_threshold=-50dB,loudnorm=I=-16:TP=-1.5:LRA=11";
 
         List<String> cmd = Arrays.asList(
                 ffmpegCmdResolved, "-y",
@@ -184,64 +185,108 @@ public class TtsServiceImpl implements TtsService {
         }
     }
 
+    /**
+     * Ghép các file âm thanh sử dụng hiệu ứng Crossfade (nối mềm).
+     * Input: Danh sách file WAV.
+     * Output: File MP3 hoàn chỉnh.
+     */
     private String performFfmpegConcatFilterComplex(List<String> inputs, String outputFilePath, Path workingDir) {
-        if (inputs == null || inputs.isEmpty()) throw new IllegalArgumentException("Không có file đầu vào để ghép.");
-        if (ffmpegCmdResolved == null) throw new IllegalStateException("ffmpeg không khả dụng.");
+        if (inputs == null || inputs.isEmpty()) {
+            throw new IllegalArgumentException("Danh sách file đầu vào trống.");
+        }
+        if (ffmpegCmdResolved == null) {
+            throw new IllegalStateException("FFmpeg chưa được cấu hình.");
+        }
 
-        try {
-            // 1. Tạo file list cho concat demuxer
-            Path listFile = Files.createTempFile("ffmpeg_concat_", ".txt");
-            StringBuilder sb = new StringBuilder();
-            for (String in : inputs) {
-                // Escape đường dẫn cho an toàn
-                String safePath = in.replace("'", "'\\''");
-                sb.append("file '").append(safePath).append("'\n");
+        List<String> cmd = new ArrayList<>();
+        cmd.add(ffmpegCmdResolved);
+        cmd.add("-y");
+
+        // 1. Thêm tất cả file đầu vào (-i file1 -i file2 ...)
+        for (String in : inputs) {
+            cmd.add("-i");
+            cmd.add(in);
+        }
+
+        // 2. Xây dựng Filter Complex cho Crossfade
+        // Nếu chỉ có 1 file thì không cần crossfade, chỉ format lại.
+        if (inputs.size() == 1) {
+            cmd.add("-filter_complex");
+            cmd.add("[0:a]aformat=sample_rates=44100:channel_layouts=stereo[out]");
+            cmd.add("-map");
+            cmd.add("[out]");
+        } else {
+            // Logic nối nhiều file:
+            // File 0 + File 1 -> (crossfade) -> Temp 1
+            // Temp 1 + File 2 -> (crossfade) -> Temp 2 ...
+            StringBuilder filter = new StringBuilder();
+
+            for (int i = 0; i < inputs.size() - 1; i++) {
+                // Xác định label đầu vào thứ nhất (là file đầu tiên hoặc kết quả của phép nối trước)
+                String inputLabel1 = (i == 0) ? "[0:a]" : "[a" + i + "]";
+                // Xác định label đầu vào thứ hai (là file tiếp theo trong danh sách)
+                String inputLabel2 = "[" + (i + 1) + ":a]";
+                // Xác định label đầu ra
+                String outputLabel = "[a" + (i + 1) + "]";
+
+                // Cú pháp acrossfade:
+                // d=0.05: Độ dài đoạn gối nhau là 0.05 giây (50ms).
+                // c1=tri:c2=tri: Đường cong fade dạng tam giác (mượt mà cho giọng nói).
+                filter.append(inputLabel1)
+                        .append(inputLabel2)
+                        .append("acrossfade=d=0.05:c1=tri:c2=tri")
+                        .append(outputLabel)
+                        .append(";");
             }
-            Files.write(listFile, sb.toString().getBytes());
 
-            // 2. Chuẩn bị lệnh FFmpeg
-            List<String> cmd = new ArrayList<>();
-            cmd.add(ffmpegCmdResolved);
-            cmd.add("-y");
-            cmd.add("-f"); cmd.add("concat");
-            cmd.add("-safe"); cmd.add("0");
-            cmd.add("-i"); cmd.add(listFile.toAbsolutePath().toString());
+            // Xóa dấu chấm phẩy cuối cùng nếu thừa
+            if (filter.length() > 0 && filter.charAt(filter.length() - 1) == ';') {
+                filter.deleteCharAt(filter.length() - 1);
+            }
 
-            // Encoding settings cho MP3
-            cmd.add("-c:a"); cmd.add("libmp3lame");
-            cmd.add("-b:a"); cmd.add("192k");
-            cmd.add("-ar"); cmd.add("44100");
-            cmd.add("-ac"); cmd.add("2");
+            cmd.add("-filter_complex");
+            cmd.add(filter.toString());
 
-            cmd.add("-avoid_negative_ts"); cmd.add("make_zero");
+            // Map stream cuối cùng ra output
+            cmd.add("-map");
+            cmd.add("[a" + (inputs.size() - 1) + "]");
+        }
 
-            cmd.add(outputFilePath);
+        // 3. Cấu hình Encode MP3 đầu ra
+        cmd.add("-c:a"); cmd.add("libmp3lame"); // Encoder MP3 chất lượng cao
+        cmd.add("-b:a"); cmd.add("192k");       // Bitrate 192kbps
+        cmd.add("-ar"); cmd.add("44100");       // Sample rate 44.1kHz
 
+        // Các cờ tối ưu tránh lỗi timestamp khi ghép nối
+        cmd.add("-avoid_negative_ts"); cmd.add("make_zero");
+
+        cmd.add(outputFilePath);
+
+        // 4. Thực thi lệnh
+        try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             if (workingDir != null) pb.directory(workingDir.toFile());
             pb.redirectErrorStream(true);
-
             Process p = pb.start();
 
-            // Log output
-            try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
-                String line;
-                while ((line = br.readLine()) != null) {
-                    // System.out.println("[FFMPEG] " + line);
-                }
-            }
+            // Đọc log (quan trọng để debug nếu FFmpeg báo lỗi filter)
+            StringBuilder outputLog = new StringBuilder();
+            Thread logger = new Thread(new StreamGobbler(p.getInputStream(), line -> {
+                outputLog.append(line).append(System.lineSeparator());
+            }));
+            logger.start();
 
             int rc = p.waitFor();
-            Files.deleteIfExists(listFile);
+            logger.join(); // Đợi đọc xong log
 
             if (rc != 0) {
-                throw new RuntimeException("Ghép file FFmpeg thất bại, mã thoát=" + rc);
+                throw new RuntimeException("FFmpeg Crossfade thất bại, mã thoát=" + rc + "\nLOG:\n" + outputLog.toString());
             }
 
             return outputFilePath;
 
         } catch (Exception e) {
-            throw new RuntimeException("Lỗi trong quá trình ghép file", e);
+            throw new RuntimeException("Lỗi trong quá trình ghép file (Crossfade)", e);
         }
     }
 
@@ -451,7 +496,7 @@ public class TtsServiceImpl implements TtsService {
 
                     // Thêm PAUSE ngắn giữa các từ đơn để tạo âm thanh tự nhiên hơn
                     if (i < subWords.length - 1) {
-                        Path silenceFile = createSilenceMp3File(COMPOUND_WORD_SPLIT_PAUSE_SEC);
+                        Path silenceFile = createSilenceWavFile(COMPOUND_WORD_SPLIT_PAUSE_SEC);
                         if (silenceFile != null) {
                             inputFiles.add(silenceFile.toAbsolutePath().toString());
                             tempFilesToCleanUp.add(silenceFile);
@@ -499,7 +544,7 @@ public class TtsServiceImpl implements TtsService {
                 // A. Xử lý Pause
                 if (t.startsWith("PAUSE:")) {
                     Double sec = Double.parseDouble(t.substring(6));
-                    Path silenceFile = createSilenceMp3File(sec);
+                    Path silenceFile = createSilenceWavFile(sec);
                     if (silenceFile != null) {
                         inputFiles.add(silenceFile.toAbsolutePath().toString());
                         tempFilesToCleanUp.add(silenceFile);
