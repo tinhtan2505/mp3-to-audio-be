@@ -136,33 +136,56 @@ public class TtsServiceImpl implements TtsService {
         }
     }
 
-    private String trimSilence(String inputPath, Path tempDir) {
+    /**
+     * Xử lý cắt khoảng lặng VÀ điều chỉnh ngữ điệu (Pitch/Duration) trong cùng 1 lệnh FFmpeg.
+     * * @param positionType: "start", "mid", "end"
+     */
+    private String processAudioSegment(String inputPath, Path tempDir, String positionType) {
 
         if (inputPath == null || inputPath.isBlank()) {
-            throw new IllegalArgumentException("Đường dẫn file audio đầu vào không được rỗng hoặc null.");
+            throw new IllegalArgumentException("Input path is null");
         }
-        if (tempDir == null) {
-            throw new IllegalArgumentException("Đường dẫn thư mục tạm thời không được null.");
-        }
-
-        if (ffmpegCmdResolved == null) throw new IllegalStateException("Không tìm thấy FFmpeg.");
+        if (ffmpegCmdResolved == null) throw new IllegalStateException("FFmpeg not found");
 
         String fileName = new File(inputPath).getName();
-        // Tạo file tạm .wav (quan trọng: dùng wav để tránh padding của mp3)
-        String outputFileName = "trimmed_" + UUID.randomUUID().toString() + "_" + fileName + ".wav";
+        String outputFileName = "seg_" + positionType + "_" + UUID.randomUUID().toString() + ".wav";
         Path outputPath = tempDir.resolve(outputFileName);
 
-        // Filter:
-        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.05:stop_threshold=-50dB";
-//        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.1:stop_threshold=-50dB,loudnorm=I=-16:TP=-1.5:LRA=11";
+        // 1. Base Filter: Cắt khoảng lặng (Giữ nguyên thông số bạn đang dùng ok)
+        // Lưu ý: stop_duration=0.05 để đuôi gọn gàng
+        StringBuilder filterBuilder = new StringBuilder();
+        filterBuilder.append("silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.05:stop_threshold=-50dB");
 
+        // 2. Prosody Filter: Điều chỉnh theo vị trí
+        // Lưu ý quan trọng: Sau khi dùng asetrate (đổi sample rate), PHẢI dùng aresample=44100 để đưa về chuẩn chung, nếu không ghép file sẽ lỗi.
+        switch (positionType) {
+            case "start":
+                // Đầu câu: Tăng tone 4% và nhanh hơn 4% -> Tạo năng lượng khởi đầu
+                // asetrate=44100*1.04
+                filterBuilder.append(",asetrate=45864,aresample=44100");
+                break;
+
+            case "end":
+                // Cuối câu: Giảm tone 8% và chậm hơn 8% -> Tạo cảm giác xuống giọng kết thúc
+                // asetrate=44100*0.92
+                filterBuilder.append(",asetrate=40572,aresample=44100");
+                break;
+
+            case "mid":
+            default:
+                // Giữa câu: Giữ nguyên (hoặc có thể tăng rất nhẹ 1.01 nếu muốn giọng bay bổng)
+                // Không làm gì thêm
+                break;
+        }
+
+        // Chuẩn hóa định dạng đầu ra (PCM WAV 16bit, 44100Hz, Stereo) để dễ ghép
         List<String> cmd = Arrays.asList(
                 ffmpegCmdResolved, "-y",
                 "-i", inputPath,
-                "-af", filter,
-                "-c:a", "pcm_s16le", // Convert sang WAV PCM
-                "-ar", "44100",      // Chuẩn hóa sample rate
-                "-ac", "2",          // Chuẩn hóa stereo
+                "-af", filterBuilder.toString(),
+                "-c:a", "pcm_s16le",
+                "-ar", "44100",
+                "-ac", "2",
                 outputPath.toAbsolutePath().toString()
         );
 
@@ -171,17 +194,17 @@ public class TtsServiceImpl implements TtsService {
             pb.redirectErrorStream(true);
             Process p = pb.start();
 
-            // Sử dụng StreamGobbler để đọc luồng output/error của tiến trình
+            // Gobbler để tránh treo process nếu buffer đầy
             new Thread(new StreamGobbler(p.getInputStream(), s -> {})).start();
 
             int rc = p.waitFor();
             if (rc != 0) {
                 Files.deleteIfExists(outputPath);
-                throw new RuntimeException("Cắt khoảng lặng thất bại, mã thoát=" + rc + ". Lệnh: " + String.join(" ", cmd));
+                throw new RuntimeException("Lỗi xử lý audio segment (" + positionType + "), mã thoát=" + rc);
             }
             return outputPath.toAbsolutePath().toString();
         } catch (Exception e) {
-            throw new RuntimeException("Lỗi trong quá trình cắt khoảng lặng cho đường dẫn: " + inputPath, e);
+            throw new RuntimeException("Lỗi khi xử lý file: " + inputPath, e);
         }
     }
 
@@ -459,6 +482,7 @@ public class TtsServiceImpl implements TtsService {
 
     private void processTokenToFiles(
             String token,
+            String positionType,
             List<String> inputFiles,
             List<String> notFoundWords,
             Set<Path> tempFilesToCleanUp,
@@ -467,12 +491,11 @@ public class TtsServiceImpl implements TtsService {
         // 1. Tìm token (Có thể là từ ghép hoặc từ đơn)
         Optional<Words> opt = wordsRepository.findActiveByName(token);
 
-        // Kiểm tra Path không null/rỗng để tránh lỗi trimSilence
         if (opt.isPresent() && opt.get().getPath() != null && !opt.get().getPath().isEmpty()) {
             // 1a. TÌM THẤY: Xử lý file audio bình thường (trim & add)
             String originalPath = opt.get().getPath();
             try {
-                String trimmedPath = trimSilence(originalPath, tmpDir);
+                String trimmedPath = processAudioSegment(originalPath, tmpDir, "mid");
                 inputFiles.add(trimmedPath);
                 tempFilesToCleanUp.add(Paths.get(trimmedPath));
             } catch (Exception e) {
@@ -487,6 +510,9 @@ public class TtsServiceImpl implements TtsService {
 
             for (int i = 0; i < subWords.length; i++) {
                 String subWord = subWords[i];
+                String subPosition = "mid";
+                if (positionType.equals("start") && i == 0) subPosition = "start";
+                if (positionType.equals("end") && i == subWords.length - 1) subPosition = "end";
 
                 // Tìm từ đơn trong DB
                 Optional<Words> subOpt = wordsRepository.findActiveByName(subWord);
@@ -497,7 +523,7 @@ public class TtsServiceImpl implements TtsService {
                     String originalPath = subOpt.get().getPath();
                     try {
                         // Trim từ đơn
-                        String trimmedPath = trimSilence(originalPath, tmpDir);
+                        String trimmedPath = processAudioSegment(originalPath, tmpDir, subPosition);
                         inputFiles.add(trimmedPath);
                         tempFilesToCleanUp.add(Paths.get(trimmedPath));
                     } catch (Exception e) {
@@ -550,7 +576,8 @@ public class TtsServiceImpl implements TtsService {
         try {
             Files.createDirectories(tmpDir);
 
-            for (String t : tokens) {
+            for (int i = 0; i < tokens.size(); i++) {
+                String t = tokens.get(i);
                 // A. Xử lý Pause
                 if (t.startsWith("PAUSE:")) {
                     Double sec = Double.parseDouble(t.substring(6));
@@ -562,8 +589,22 @@ public class TtsServiceImpl implements TtsService {
                     continue;
                 }
 
-                // B. Xử lý Từ / Từ ghép (bao gồm logic fallback)
-                processTokenToFiles(t, inputFiles, notFoundWords, tempFilesToCleanUp, tmpDir);
+                // B. Xác định vị trí (Logic thông minh hơn 1 chút để bỏ qua dấu câu)
+                String positionType = "mid";
+
+                // Nếu là từ đầu tiên (không tính pause đầu nếu có)
+                if (i == 0 || (i == 1 && tokens.get(0).startsWith("PAUSE:"))) {
+                    positionType = "start";
+                }
+                // Nếu là từ cuối cùng
+                else if (i == tokens.size() - 1) {
+                    positionType = "end";
+                }
+
+                System.out.println("positionType: " + positionType);
+
+                // Gọi hàm xử lý
+                processTokenToFiles(t, positionType, inputFiles, notFoundWords, tempFilesToCleanUp, tmpDir);
             }
 
             if (inputFiles.isEmpty()) {
