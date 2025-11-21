@@ -153,8 +153,8 @@ public class TtsServiceImpl implements TtsService {
         Path outputPath = tempDir.resolve(outputFileName);
 
         // Filter:
-//        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0:stop_threshold=-50dB";
-        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.1:stop_threshold=-50dB,loudnorm=I=-16:TP=-1.5:LRA=11";
+        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.05:stop_threshold=-50dB";
+//        String filter = "silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.1:stop_threshold=-50dB,loudnorm=I=-16:TP=-1.5:LRA=11";
 
         List<String> cmd = Arrays.asList(
                 ffmpegCmdResolved, "-y",
@@ -185,11 +185,6 @@ public class TtsServiceImpl implements TtsService {
         }
     }
 
-    /**
-     * Ghép các file âm thanh sử dụng hiệu ứng Crossfade (nối mềm).
-     * Input: Danh sách file WAV.
-     * Output: File MP3 hoàn chỉnh.
-     */
     private String performFfmpegConcatFilterComplex(List<String> inputs, String outputFilePath, Path workingDir) {
         if (inputs == null || inputs.isEmpty()) {
             throw new IllegalArgumentException("Danh sách file đầu vào trống.");
@@ -202,74 +197,90 @@ public class TtsServiceImpl implements TtsService {
         cmd.add(ffmpegCmdResolved);
         cmd.add("-y");
 
-        // 1. Thêm tất cả file đầu vào (-i file1 -i file2 ...)
+        // 1. Input tất cả các file
         for (String in : inputs) {
             cmd.add("-i");
             cmd.add(in);
         }
 
-        // 2. Xây dựng Filter Complex cho Crossfade
-        // Nếu chỉ có 1 file thì không cần crossfade, chỉ format lại.
-        if (inputs.size() == 1) {
-            cmd.add("-filter_complex");
-            cmd.add("[0:a]aformat=sample_rates=44100:channel_layouts=stereo[out]");
-            cmd.add("-map");
-            cmd.add("[out]");
-        } else {
-            // Logic nối nhiều file:
-            // File 0 + File 1 -> (crossfade) -> Temp 1
-            // Temp 1 + File 2 -> (crossfade) -> Temp 2 ...
-            StringBuilder filter = new StringBuilder();
+        StringBuilder filter = new StringBuilder();
+        int lastIdx = inputs.size() - 1;
+        String lastNodeLabel;
 
+        // 2. Xử lý hạ giọng từ cuối cùng (Pre-processing Last Word)
+        // Nếu chỉ có 1 từ hoặc nhiều từ, từ cuối cùng luôn cần hạ giọng.
+        // asetrate=44100*0.92: Giảm tone và tốc độ xuống còn 92% (Trầm hơn, chậm hơn)
+        // aresample=44100: Đưa sample rate về lại chuẩn để khớp với các file khác
+        filter.append("[").append(lastIdx).append(":a]")
+                .append("asetrate=44100*0.92,aresample=44100")
+                .append("[last_mod];");
+
+        lastNodeLabel = "[last_mod]";
+
+        // 3. Logic nối file (Crossfade Loop)
+        String currentStream = "[0:a]"; // Bắt đầu với file đầu tiên
+
+        if (inputs.size() > 1) {
             for (int i = 0; i < inputs.size() - 1; i++) {
-                // Xác định label đầu vào thứ nhất (là file đầu tiên hoặc kết quả của phép nối trước)
-                String inputLabel1 = (i == 0) ? "[0:a]" : "[a" + i + "]";
-                // Xác định label đầu vào thứ hai (là file tiếp theo trong danh sách)
-                String inputLabel2 = "[" + (i + 1) + ":a]";
-                // Xác định label đầu ra
-                String outputLabel = "[a" + (i + 1) + "]";
+                // Input 1: Là file hiện tại (hoặc kết quả nối trước đó)
+                String inputLabel1 = (i == 0) ? "[0:a]" : "[tmp" + i + "]";
 
-                // Cú pháp acrossfade:
-                // d=0.05: Độ dài đoạn gối nhau là 0.05 giây (50ms).
-                // c1=tri:c2=tri: Đường cong fade dạng tam giác (mượt mà cho giọng nói).
+                // Input 2:
+                // Nếu đây là lần nối cuối cùng -> Lấy file đã hạ giọng [last_mod]
+                // Nếu chưa phải cuối cùng -> Lấy file tiếp theo [i+1:a]
+                String inputLabel2 = (i == inputs.size() - 2) ? "[last_mod]" : "[" + (i + 1) + ":a]";
+
+                // Output:
+                String outputLabel = "[tmp" + (i + 1) + "]";
+
                 filter.append(inputLabel1)
                         .append(inputLabel2)
-                        .append("acrossfade=d=0.05:c1=tri:c2=tri")
+                        // d=0.04: Crossfade 40ms
+                        .append("acrossfade=d=0.04:c1=tri:c2=tri")
                         .append(outputLabel)
                         .append(";");
+
+                currentStream = outputLabel;
             }
-
-            // Xóa dấu chấm phẩy cuối cùng nếu thừa
-            if (filter.length() > 0 && filter.charAt(filter.length() - 1) == ';') {
-                filter.deleteCharAt(filter.length() - 1);
-            }
-
-            cmd.add("-filter_complex");
-            cmd.add(filter.toString());
-
-            // Map stream cuối cùng ra output
-            cmd.add("-map");
-            cmd.add("[a" + (inputs.size() - 1) + "]");
+        } else {
+            // Nếu chỉ có 1 file duy nhất, thì chính file đó là [last_mod]
+            currentStream = "[last_mod]";
         }
 
-        // 3. Cấu hình Encode MP3 đầu ra
-        cmd.add("-c:a"); cmd.add("libmp3lame"); // Encoder MP3 chất lượng cao
-        cmd.add("-b:a"); cmd.add("192k");       // Bitrate 192kbps
-        cmd.add("-ar"); cmd.add("44100");       // Sample rate 44.1kHz
+        // Xóa dấu ; thừa nếu có
+        if (filter.length() > 0 && filter.charAt(filter.length() - 1) == ';') {
+            filter.deleteCharAt(filter.length() - 1);
+        }
 
-        // Các cờ tối ưu tránh lỗi timestamp khi ghép nối
+        // 4. Giai đoạn Hậu kỳ (Post-Processing)
+        // Nối thêm atempo và loudnorm
+        if (filter.length() > 0) filter.append(";");
+
+        filter.append(currentStream)
+                .append("atempo=1.15,loudnorm=I=-16:TP=-1.5:LRA=11")
+                .append("[out_final]");
+
+        cmd.add("-filter_complex");
+        cmd.add(filter.toString());
+
+        cmd.add("-map");
+        cmd.add("[out_final]");
+
+        // 5. Encode Output
+        cmd.add("-c:a"); cmd.add("libmp3lame");
+        cmd.add("-b:a"); cmd.add("192k");
+        cmd.add("-ar"); cmd.add("44100");
         cmd.add("-avoid_negative_ts"); cmd.add("make_zero");
 
         cmd.add(outputFilePath);
 
-        // 4. Thực thi lệnh
+        // 6. Thực thi
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             if (workingDir != null) pb.directory(workingDir.toFile());
             pb.redirectErrorStream(true);
             Process p = pb.start();
 
-            // Đọc log (quan trọng để debug nếu FFmpeg báo lỗi filter)
             StringBuilder outputLog = new StringBuilder();
             Thread logger = new Thread(new StreamGobbler(p.getInputStream(), line -> {
                 outputLog.append(line).append(System.lineSeparator());
@@ -277,16 +288,15 @@ public class TtsServiceImpl implements TtsService {
             logger.start();
 
             int rc = p.waitFor();
-            logger.join(); // Đợi đọc xong log
+            logger.join();
 
             if (rc != 0) {
-                throw new RuntimeException("FFmpeg Crossfade thất bại, mã thoát=" + rc + "\nLOG:\n" + outputLog.toString());
+                throw new RuntimeException("FFmpeg Error Log:\n" + outputLog.toString());
             }
-
             return outputFilePath;
 
         } catch (Exception e) {
-            throw new RuntimeException("Lỗi trong quá trình ghép file (Crossfade)", e);
+            throw new RuntimeException("Lỗi ghép file", e);
         }
     }
 
