@@ -369,53 +369,71 @@ public class TtsServiceImpl implements TtsService {
             return null;
         }
 
-        System.out.println("Bắt đầu quét tìm 10 từ mới...");
+        System.out.println("--- BẮT ĐẦU QUÉT TÌM TỪ MỚI ---");
 
+        List<String> wordsToProcess = new ArrayList<>();
+
+        // BƯỚC 1: Lọc ra 10 từ chưa có trong DB và đưa vào List
+        // Dùng try-with-resources để đóng file ngay sau khi đọc xong
         try (Stream<String> lines = Files.lines(path)) {
-            lines
-                    .map(String::trim)                 // 1. Cắt khoảng trắng thừa
-                    .filter(text -> !text.isEmpty())   // 2. Bỏ dòng trống
-                    .filter(text -> {                  // 3. QUAN TRỌNG: Kiểm tra DB trước
-                        // Nếu từ đã tồn tại -> trả về false (để dòng này bị loại bỏ khỏi Stream)
-                        // Nếu từ chưa có -> trả về true (giữ lại để xử lý)
-                        boolean exists = wordsRepository.findFirstByNameIgnoreCase(text).isPresent();
-                        if (exists) {
-                            // System.out.println("Bỏ qua từ đã có: " + text); // Uncomment nếu muốn debug
-                        }
-                        return !exists;
+            wordsToProcess = lines
+                    .map(String::trim)
+                    .filter(text -> !text.isEmpty())
+                    .filter(text -> {
+                        // Kiểm tra DB, nếu có rồi thì bỏ qua
+                        return wordsRepository.findFirstByNameIgnoreCase(text).isEmpty();
                     })
-                    .limit(20)                         // 4. Chỉ lấy 10 từ thỏa mãn điều kiện trên
-                    .forEach(textToSpeak -> {          // 5. Thực hiện xử lý cho 10 từ này
-                        System.out.println(">>> Đang xử lý từ mới: " + textToSpeak);
-                        try {
-                            // Gọi hàm tải MP3 và lưu vào DB
-                            // Lưu ý: Hàm này phải có logic lưu Words vào DB sau khi tải xong
-                            // để lần chạy sau bộ lọc ở bước 3 mới hoạt động đúng.
-                            speechSynthesisViettel(textToSpeak);
-
-                            // Nghỉ 1 chút
-                            Thread.sleep(5000);
-                        } catch (Exception e) {
-                            System.err.println("Lỗi xử lý từ: " + textToSpeak + " - " + e.getMessage());
-                        }
-                    });
-
-            System.out.println("=== Hoàn tất batch 10 từ ===");
-
+                    .limit(1000) // Chỉ lấy 10 từ
+                    .toList(); // Java 16+ (hoặc .collect(Collectors.toList()) với Java thấp hơn)
         } catch (IOException e) {
             e.printStackTrace();
+            return null;
         }
+
+        if (wordsToProcess.isEmpty()) {
+            System.out.println("Không tìm thấy từ mới nào (hoặc đã tải hết).");
+            return null;
+        }
+
+        // BƯỚC 2: Chạy vòng lặp For truyền thống để dễ dàng BREAK
+        System.out.println("Tìm thấy " + wordsToProcess.size() + " từ cần xử lý. Bắt đầu tải...");
+        int successCount = 0;
+
+        for (String textToSpeak : wordsToProcess) {
+            System.out.println(">>> Đang xử lý: " + textToSpeak);
+            try {
+                // Gọi hàm tải. Hàm này cần ném ra Exception nếu lỗi (xem cập nhật bên dưới)
+                speechSynthesisViettel(textToSpeak);
+                successCount++;
+
+                // Nếu thành công thì ngủ 1 chút
+                Thread.sleep(2000);
+
+            } catch (Exception e) {
+                // NẾU GẶP BẤT KỲ LỖI GÌ (429, Mất mạng,...) -> DỪNG NGAY
+                System.err.println("!!! GẶP LỖI NGHIÊM TRỌNG KHI TẢI TỪ: " + textToSpeak);
+                System.err.println("!!! Chi tiết lỗi: " + e.getMessage());
+                System.err.println("!!! -> DỪNG VÒNG LẶP NGAY LẬP TỨC.");
+
+                break; // <--- LỆNH QUAN TRỌNG NHẤT: Thoát khỏi vòng for
+            }
+        }
+        System.out.println("\n========================================");
+        System.out.println("   THÔNG BÁO KẾT THÚC");
+        System.out.println("========================================");
+        System.out.println("Tổng số từ dự kiến: " + wordsToProcess.size());
+        System.out.println("Số từ thành công  : " + successCount);
+
+        if (successCount < wordsToProcess.size()) {
+            System.out.println("TRẠNG THÁI: DỪNG SỚM DO CÓ LỖI.");
+        } else {
+            System.out.println("TRẠNG THÁI: HOÀN THÀNH 100%.");
+        }
+        System.out.println("========================================\n");
         return null;
     }
 
-    public byte[] speechSynthesisViettel(String text) {
-//        Optional<Words> existingWord = wordsRepository.findFirstByNameIgnoreCase(text);
-//        if (existingWord.isPresent()) {
-//            System.out.println("Từ đã tồn tại trong DB: " + text + " -> Bỏ qua.");
-//            return null; // Kết thúc hàm, không gọi API
-//        }
-//
-//        System.out.println("Từ chưa tồn tại, đang gọi API Viettel cho: " + text);
+    public void speechSynthesisViettel(String text) {
         // Cấu hình Header
         String token = "e1f5ac197128ebf2c8039472bffc4fc2";
         HttpHeaders headers = new HttpHeaders();
@@ -445,53 +463,37 @@ public class TtsServiceImpl implements TtsService {
             if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
                 byte[] audioBytes = response.getBody();
 
-                // 5. Cấu hình đường dẫn lưu file
+                // Lưu file
                 String outputDir = "D:/BackUp Db/mp3-output";
                 Path dirPath = Paths.get(outputDir);
+                if (!Files.exists(dirPath)) Files.createDirectories(dirPath);
 
-                // Tạo thư mục nếu chưa tồn tại
-                if (!Files.exists(dirPath)) {
-                    Files.createDirectories(dirPath);
-                }
-
-                // Tạo tên file duy nhất: viettel_tts_YYYYMMDD_HHMMSS.mp3
-//                String timeStamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
-                String fileName = text + ".mp3";
+                String fileName = text.trim() + ".mp3";
                 Path filePath = dirPath.resolve(fileName);
-
-                // 6. Ghi byte[] ra file
                 Files.write(filePath, audioBytes);
+                System.out.println("   -> Đã lưu file: " + fileName);
 
-                System.out.println("Đã tải file thành công tại: " + filePath.toAbsolutePath());
+                // Lưu DB
+                Words newWord = Words.builder()
+                        .name(text)
+                        .fullName(fileName)
+                        .path(filePath.toAbsolutePath().toString())
+                        .type("mp3")
+                        .build();
+                newWord.setActive(true);
+                wordsRepository.save(newWord);
+                System.out.println("   -> Đã lưu DB.");
 
-                try {
-                    Words newWord = Words.builder()
-                            .name(text)                         // Tên từ hiển thị
-                            .fullName(fileName)                 // Tên file (abc.mp3)
-                            .path(filePath.toAbsolutePath().toString()) // Đường dẫn tuyệt đối
-                            .type("mp3")                        // Loại file
-                            .build();
-
-                    // Set active = true để lần sau tìm kiếm sẽ thấy
-                    newWord.setActive(true);
-                    // Nếu Entity Words của bạn có trường extension, hãy set thêm: newWord.setExtension("mp3");
-
-                    wordsRepository.save(newWord);
-                    System.out.println(">> Database Inserted: " + text);
-
-                } catch (Exception dbEx) {
-                    System.err.println("!!! LỖI LƯU DB cho từ: " + text + " -> " + dbEx.getMessage());
-                    // Không throw exception ở đây để vòng lặp vẫn tiếp tục chạy từ tiếp theo
-                }
-
-                // Trả về đường dẫn file để sử dụng tiếp nếu cần
-                return null;
             } else {
-                throw new RuntimeException("Lỗi khi gọi Viettel AI: " + response.getStatusCode());
+                // Ném lỗi nếu status code không phải 200
+                throw new RuntimeException("API trả về lỗi status: " + response.getStatusCode());
             }
         } catch (Exception e) {
-            e.printStackTrace();
-            throw new RuntimeException("Không thể kết nối tới Viettel AI");
+            // Ném lỗi ra ngoài để vòng lặp for bắt được và dừng lại
+            // In lỗi để debug
+            // System.err.println("Lỗi API: " + e.getMessage());
+//            throw e; // <--- QUAN TRỌNG: Phải ném lỗi ra ngoài
+            throw new RuntimeException("API trả về lỗi status: " + e.getMessage());
         }
     }
 
