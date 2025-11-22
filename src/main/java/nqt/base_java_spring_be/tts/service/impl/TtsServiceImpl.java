@@ -4,10 +4,13 @@ import nqt.base_java_spring_be.entity.Words;
 import nqt.base_java_spring_be.repository.WordsRepository;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Request;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Result;
+import nqt.base_java_spring_be.tts.dto.ViettelTtsRequest;
 import nqt.base_java_spring_be.tts.service.iservices.TtsService;
 import nqt.base_java_spring_be.utils.StreamGobbler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.http.*;
 
 import javax.annotation.PostConstruct;
 import java.io.BufferedReader;
@@ -20,6 +23,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 @Service
 public class TtsServiceImpl implements TtsService {
@@ -27,6 +31,9 @@ public class TtsServiceImpl implements TtsService {
     private String ffmpegCmdResolved;
     private static final int MAX_SEARCH_WORDS = 2;
     private static final double COMPOUND_WORD_SPLIT_PAUSE_SEC = 0.01;
+    private final RestTemplate restTemplate = new RestTemplate();
+    // URL từ tài liệu Viettel AI
+    private static final String VIETTEL_API_URL = "https://viettelai.vn/tts/speech_synthesis";
 
     private final WordsRepository wordsRepository;
 
@@ -326,7 +333,7 @@ public class TtsServiceImpl implements TtsService {
     // --- HÀM XỬ LÝ DATABASE & TOKENIZATION ---
 
     public void insertWords(){
-        String directoryPath = "D:/BackUp Db/work1";
+        String directoryPath = "D:/BackUp Db/mp3-output";
         File folder = new File(directoryPath);
 
         if (!folder.exists() || !folder.isDirectory()) {
@@ -351,6 +358,141 @@ public class TtsServiceImpl implements TtsService {
             }
         }
         wordsRepository.saveAll(words);
+    }
+
+    public byte[] speechSynthesis() {
+        String filePath = "src/main/java/nqt/base_java_spring_be/data/Viet11K.txt";
+        Path path = Paths.get(filePath);
+
+        if (!Files.exists(path)) {
+            System.err.println("Không tìm thấy file tại: " + path.toAbsolutePath());
+            return null;
+        }
+
+        System.out.println("Bắt đầu quét tìm 10 từ mới...");
+
+        try (Stream<String> lines = Files.lines(path)) {
+            lines
+                    .map(String::trim)                 // 1. Cắt khoảng trắng thừa
+                    .filter(text -> !text.isEmpty())   // 2. Bỏ dòng trống
+                    .filter(text -> {                  // 3. QUAN TRỌNG: Kiểm tra DB trước
+                        // Nếu từ đã tồn tại -> trả về false (để dòng này bị loại bỏ khỏi Stream)
+                        // Nếu từ chưa có -> trả về true (giữ lại để xử lý)
+                        boolean exists = wordsRepository.findFirstByNameIgnoreCase(text).isPresent();
+                        if (exists) {
+                            // System.out.println("Bỏ qua từ đã có: " + text); // Uncomment nếu muốn debug
+                        }
+                        return !exists;
+                    })
+                    .limit(20)                         // 4. Chỉ lấy 10 từ thỏa mãn điều kiện trên
+                    .forEach(textToSpeak -> {          // 5. Thực hiện xử lý cho 10 từ này
+                        System.out.println(">>> Đang xử lý từ mới: " + textToSpeak);
+                        try {
+                            // Gọi hàm tải MP3 và lưu vào DB
+                            // Lưu ý: Hàm này phải có logic lưu Words vào DB sau khi tải xong
+                            // để lần chạy sau bộ lọc ở bước 3 mới hoạt động đúng.
+                            speechSynthesisViettel(textToSpeak);
+
+                            // Nghỉ 1 chút
+                            Thread.sleep(5000);
+                        } catch (Exception e) {
+                            System.err.println("Lỗi xử lý từ: " + textToSpeak + " - " + e.getMessage());
+                        }
+                    });
+
+            System.out.println("=== Hoàn tất batch 10 từ ===");
+
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    public byte[] speechSynthesisViettel(String text) {
+//        Optional<Words> existingWord = wordsRepository.findFirstByNameIgnoreCase(text);
+//        if (existingWord.isPresent()) {
+//            System.out.println("Từ đã tồn tại trong DB: " + text + " -> Bỏ qua.");
+//            return null; // Kết thúc hàm, không gọi API
+//        }
+//
+//        System.out.println("Từ chưa tồn tại, đang gọi API Viettel cho: " + text);
+        // Cấu hình Header
+        String token = "e1f5ac197128ebf2c8039472bffc4fc2";
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.set("accept", "*/*");
+
+        ViettelTtsRequest requestBody = ViettelTtsRequest.builder()
+                .text(text)
+                .voice("hn-thanhphuong") // Giọng nữ miền Bắc
+                .speed(1.0f)
+                .ttsReturnOption(3) // 3 = mp3
+                .token(token)
+                .withoutFilter(false)
+                .build();
+
+        HttpEntity<ViettelTtsRequest> entity = new HttpEntity<>(requestBody, headers);
+
+        // Gọi API
+        try {
+            ResponseEntity<byte[]> response = restTemplate.exchange(
+                    VIETTEL_API_URL,
+                    HttpMethod.POST,
+                    entity,
+                    byte[].class
+            );
+
+            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
+                byte[] audioBytes = response.getBody();
+
+                // 5. Cấu hình đường dẫn lưu file
+                String outputDir = "D:/BackUp Db/mp3-output";
+                Path dirPath = Paths.get(outputDir);
+
+                // Tạo thư mục nếu chưa tồn tại
+                if (!Files.exists(dirPath)) {
+                    Files.createDirectories(dirPath);
+                }
+
+                // Tạo tên file duy nhất: viettel_tts_YYYYMMDD_HHMMSS.mp3
+//                String timeStamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
+                String fileName = text + ".mp3";
+                Path filePath = dirPath.resolve(fileName);
+
+                // 6. Ghi byte[] ra file
+                Files.write(filePath, audioBytes);
+
+                System.out.println("Đã tải file thành công tại: " + filePath.toAbsolutePath());
+
+                try {
+                    Words newWord = Words.builder()
+                            .name(text)                         // Tên từ hiển thị
+                            .fullName(fileName)                 // Tên file (abc.mp3)
+                            .path(filePath.toAbsolutePath().toString()) // Đường dẫn tuyệt đối
+                            .type("mp3")                        // Loại file
+                            .build();
+
+                    // Set active = true để lần sau tìm kiếm sẽ thấy
+                    newWord.setActive(true);
+                    // Nếu Entity Words của bạn có trường extension, hãy set thêm: newWord.setExtension("mp3");
+
+                    wordsRepository.save(newWord);
+                    System.out.println(">> Database Inserted: " + text);
+
+                } catch (Exception dbEx) {
+                    System.err.println("!!! LỖI LƯU DB cho từ: " + text + " -> " + dbEx.getMessage());
+                    // Không throw exception ở đây để vòng lặp vẫn tiếp tục chạy từ tiếp theo
+                }
+
+                // Trả về đường dẫn file để sử dụng tiếp nếu cần
+                return null;
+            } else {
+                throw new RuntimeException("Lỗi khi gọi Viettel AI: " + response.getStatusCode());
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Không thể kết nối tới Viettel AI");
+        }
     }
 
     private void handleNotFoundWord(String word) {

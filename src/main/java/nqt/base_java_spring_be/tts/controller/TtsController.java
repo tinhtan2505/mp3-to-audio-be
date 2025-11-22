@@ -46,6 +46,22 @@ public class TtsController {
         }
     }
 
+    @PostMapping("/vi/speech-synthesis")
+    public ResponseEntity<CustomResponse<?>> speechSynthesis() {
+        try {
+            byte[] data = tts.speechSynthesis();
+            return ResponseEntity.ok(CustomResponse.success(data, "Thành công"));
+        } catch (IllegalArgumentException e) {
+            // lỗi đầu vào -> 400
+            log.warn(e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            // lỗi hệ thống -> 500
+            log.error("TTS failed for word='", e);
+            throw new RuntimeException("Thất bại: " + e.getMessage(), e);
+        }
+    }
+
     @PostMapping("/vi/text-to-mp3")
     public ResponseEntity<CustomResponse<?>> textToMp3(@Valid @RequestBody TextToMp3Request req) {
         try {
