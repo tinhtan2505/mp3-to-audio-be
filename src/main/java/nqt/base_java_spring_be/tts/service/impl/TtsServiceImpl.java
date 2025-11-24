@@ -383,7 +383,7 @@ public class TtsServiceImpl implements TtsService {
                         // Kiểm tra DB, nếu có rồi thì bỏ qua
                         return wordsRepository.findFirstByNameIgnoreCase(text).isEmpty();
                     })
-                    .limit(1000) // Chỉ lấy 10 từ
+                    .limit(10) // Chỉ lấy 10 từ
                     .toList(); // Java 16+ (hoặc .collect(Collectors.toList()) với Java thấp hơn)
         } catch (IOException e) {
             e.printStackTrace();
@@ -407,7 +407,7 @@ public class TtsServiceImpl implements TtsService {
                 successCount++;
 
                 // Nếu thành công thì ngủ 1 chút
-                Thread.sleep(2000);
+                Thread.sleep(1000);
 
             } catch (Exception e) {
                 // NẾU GẶP BẤT KỲ LỖI GÌ (429, Mất mạng,...) -> DỪNG NGAY
@@ -435,7 +435,7 @@ public class TtsServiceImpl implements TtsService {
 
     public void speechSynthesisViettel(String text) {
         // Cấu hình Header
-        String token = "e1f5ac197128ebf2c8039472bffc4fc2";
+        String token = "d5623057def0e03b28ca77ca9f0b962d";
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("accept", "*/*");
