@@ -33,7 +33,7 @@ public class TtsController {
     @PostMapping("/vi/insert-words")
     public ResponseEntity<CustomResponse<?>> insertWords() {
         try {
-            tts.insertWords();
+//            tts.insertWords();
             return ResponseEntity.ok(CustomResponse.success(null, "Thành công"));
         } catch (IllegalArgumentException e) {
             // lỗi đầu vào -> 400
@@ -49,8 +49,8 @@ public class TtsController {
     @PostMapping("/vi/speech-synthesis")
     public ResponseEntity<CustomResponse<?>> speechSynthesis() {
         try {
-            byte[] data = tts.speechSynthesis();
-            return ResponseEntity.ok(CustomResponse.success(data, "Thành công"));
+//            byte[] data = tts.speechSynthesis();
+            return ResponseEntity.ok(CustomResponse.success(null, "Thành công"));
         } catch (IllegalArgumentException e) {
             // lỗi đầu vào -> 400
             log.warn(e.getMessage());
