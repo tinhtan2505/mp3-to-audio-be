@@ -17,7 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 @Slf4j
 @RestController
-@RequestMapping("/api/tts")
+@RequestMapping("/api/tts-ai")
 @Validated
 public class TtsAIController {
 
@@ -27,10 +27,10 @@ public class TtsAIController {
         this.tts = tts;
     }
 
-    @PostMapping("/vi/text-to-mp3")
-    public ResponseEntity<CustomResponse<?>> textToMp3(@Valid @RequestBody TextToMp3Request req) {
+    @PostMapping("/vi/text-to-speech")
+    public ResponseEntity<CustomResponse<?>> textToSpeech(@Valid @RequestBody TextToMp3Request req) {
         try {
-            TextToMp3Result data = tts.textToMp3(req);
+            TextToMp3Result data = tts.textToSpeech(req);
 
             CustomResponse<TextToMp3Result> responseBody = CustomResponse.success(data, "Chuyển văn bản thành MP3 thành công");
             return ResponseEntity.ok(responseBody);

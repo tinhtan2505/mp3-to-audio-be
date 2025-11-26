@@ -58,7 +58,7 @@ public class WordsServiceImpl implements WordsService {
 }
 
 public byte[] speechSynthesis() {
-    String filePath = "src/main/java/nqt/base_java_spring_be/data/Viet11K.txt";
+    String filePath = "src/main/java/nqt/base_java_spring_be/data/next.txt";
     Path path = Paths.get(filePath);
 
     if (!Files.exists(path)) {

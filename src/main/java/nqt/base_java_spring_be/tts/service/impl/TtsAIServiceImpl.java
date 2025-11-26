@@ -530,7 +530,7 @@ public class TtsAIServiceImpl implements TtsAIService {
     // --- HÀM PUBLIC CHÍNH ---
 
     @Override
-    public TextToMp3Result textToMp3(TextToMp3Request req) {
+    public TextToMp3Result textToSpeech(TextToMp3Request req) {
         String sentence = req.getWord().toLowerCase();
         String baseOutputPath = "D:/BackUp Db/mp3-output";
 
