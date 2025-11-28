@@ -1,38 +1,30 @@
 package nqt.base_java_spring_be.tts.service.impl;
 
-import nqt.base_java_spring_be.entity.Words;
 import nqt.base_java_spring_be.repository.WordsRepository;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Request;
 import nqt.base_java_spring_be.tts.dto.TextToMp3Result;
 import nqt.base_java_spring_be.tts.service.iservices.TtsAIService;
-import nqt.base_java_spring_be.utils.StreamGobbler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.http.*;
 
 import javax.annotation.PostConstruct;
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Service
 public class TtsAIServiceImpl implements TtsAIService {
     private final String configuredFfmpegPath;
     private String ffmpegCmdResolved;
-    private static final int MAX_SEARCH_WORDS = 2;
-    private static final double COMPOUND_WORD_SPLIT_PAUSE_SEC = 0.01;
-    private final RestTemplate restTemplate = new RestTemplate();
-    // URL từ tài liệu Viettel AI
-    private static final String VIETTEL_API_URL = "https://viettelai.vn/tts/speech_synthesis";
+    @Value("${app.tts.python-service-url:http://localhost:8000/api/v1/tts}")
+    private String pythonServiceUrl;
+    private final RestTemplate restTemplate;
 
     private final WordsRepository wordsRepository;
 
@@ -41,6 +33,7 @@ public class TtsAIServiceImpl implements TtsAIService {
             WordsRepository wordsRepository) {
         this.wordsRepository = wordsRepository;
         this.configuredFfmpegPath = ffmpegPath == null ? "" : ffmpegPath.trim();
+        this.restTemplate = new RestTemplate();
     }
 
     @PostConstruct
@@ -107,505 +100,114 @@ public class TtsAIServiceImpl implements TtsAIService {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }
 
-    private Path createSilenceWavFile(Double durationSec) {
-        if (durationSec == null || durationSec <= 0) return null;
-
-        if (ffmpegCmdResolved == null) {
-            throw new IllegalStateException("ffmpeg không khả dụng.");
-        }
-
-        try {
-            // Tạo file silence WAV để không có padding MP3
-            Path tmpFile = Files.createTempFile("sil_", ".wav");
-            tmpFile.toFile().deleteOnExit();
-
-            List<String> cmd = Arrays.asList(
-                    ffmpegCmdResolved, "-y",
-                    "-f", "lavfi",
-                    "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-                    "-t", String.valueOf(durationSec),
-                    tmpFile.toAbsolutePath().toString()
-            );
-
-            Process p = new ProcessBuilder(cmd).redirectErrorStream(true).start();
-            int rc = p.waitFor();
-
-            if (rc != 0) {
-                Files.deleteIfExists(tmpFile);
-                throw new RuntimeException("ffmpeg thoát với mã lỗi " + rc + " khi tạo file silence WAV.");
-            }
-
-            return tmpFile;
-
-        } catch (Exception e) {
-            throw new RuntimeException("Lỗi khi tạo file silence WAV: " + durationSec + "s", e);
-        }
-    }
-
-    /**
-     * Xử lý cắt khoảng lặng VÀ điều chỉnh ngữ điệu (Pitch/Duration) trong cùng 1 lệnh FFmpeg.
-     * * @param positionType: "start", "mid", "end"
-     */
-    private String processAudioSegment(String inputPath, Path tempDir, String positionType) {
-
-        if (inputPath == null || inputPath.isBlank()) {
-            throw new IllegalArgumentException("Input path is null");
-        }
-        if (ffmpegCmdResolved == null) throw new IllegalStateException("FFmpeg not found");
-
-        String fileName = new File(inputPath).getName();
-        String outputFileName = "seg_" + positionType + "_" + UUID.randomUUID().toString() + ".wav";
-        Path outputPath = tempDir.resolve(outputFileName);
-
-        // 1. Base Filter: Cắt khoảng lặng (Giữ nguyên thông số bạn đang dùng ok)
-        // Lưu ý: stop_duration=0.05 để đuôi gọn gàng
-        StringBuilder filterBuilder = new StringBuilder();
-        filterBuilder.append("silenceremove=start_periods=1:start_duration=0:start_threshold=-50dB:stop_periods=1:stop_duration=0.05:stop_threshold=-50dB");
-
-        // 2. Prosody Filter: Điều chỉnh theo vị trí
-        // Lưu ý quan trọng: Sau khi dùng asetrate (đổi sample rate), PHẢI dùng aresample=44100 để đưa về chuẩn chung, nếu không ghép file sẽ lỗi.
-        switch (positionType) {
-            case "start":
-                // Đầu câu: Tăng tone 4% và nhanh hơn 4% -> Tạo năng lượng khởi đầu
-                // asetrate=44100*1.04
-                filterBuilder.append(",asetrate=45864,aresample=44100");
-                break;
-
-            case "end":
-                // Cuối câu: Giảm tone 8% và chậm hơn 8% -> Tạo cảm giác xuống giọng kết thúc
-                // asetrate=44100*0.92
-                filterBuilder.append(",asetrate=40572,aresample=44100");
-                break;
-
-            case "mid":
-            default:
-                // Giữa câu: Giữ nguyên (hoặc có thể tăng rất nhẹ 1.01 nếu muốn giọng bay bổng)
-                // Không làm gì thêm
-                break;
-        }
-
-        // Chuẩn hóa định dạng đầu ra (PCM WAV 16bit, 44100Hz, Stereo) để dễ ghép
-        List<String> cmd = Arrays.asList(
-                ffmpegCmdResolved, "-y",
-                "-i", inputPath,
-                "-af", filterBuilder.toString(),
-                "-c:a", "pcm_s16le",
-                "-ar", "44100",
-                "-ac", "2",
-                outputPath.toAbsolutePath().toString()
-        );
-
-        try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-
-            // Gobbler để tránh treo process nếu buffer đầy
-            new Thread(new StreamGobbler(p.getInputStream(), s -> {})).start();
-
-            int rc = p.waitFor();
-            if (rc != 0) {
-                Files.deleteIfExists(outputPath);
-                throw new RuntimeException("Lỗi xử lý audio segment (" + positionType + "), mã thoát=" + rc);
-            }
-            return outputPath.toAbsolutePath().toString();
-        } catch (Exception e) {
-            throw new RuntimeException("Lỗi khi xử lý file: " + inputPath, e);
-        }
-    }
-
-    private String performFfmpegConcatFilterComplex(List<String> inputs, String outputFilePath, Path workingDir) {
-        if (inputs == null || inputs.isEmpty()) {
-            throw new IllegalArgumentException("Danh sách file đầu vào trống.");
-        }
-        if (ffmpegCmdResolved == null) {
-            throw new IllegalStateException("FFmpeg chưa được cấu hình.");
-        }
-
-        List<String> cmd = new ArrayList<>();
-        cmd.add(ffmpegCmdResolved);
-        cmd.add("-y");
-
-        // 1. Input tất cả các file
-        for (String in : inputs) {
-            cmd.add("-i");
-            cmd.add(in);
-        }
-
-        StringBuilder filter = new StringBuilder();
-        int lastIdx = inputs.size() - 1;
-        String lastNodeLabel;
-
-        // 2. Xử lý hạ giọng từ cuối cùng (Pre-processing Last Word)
-        // Nếu chỉ có 1 từ hoặc nhiều từ, từ cuối cùng luôn cần hạ giọng.
-        // asetrate=44100*0.92: Giảm tone và tốc độ xuống còn 92% (Trầm hơn, chậm hơn)
-        // aresample=44100: Đưa sample rate về lại chuẩn để khớp với các file khác
-        filter.append("[").append(lastIdx).append(":a]")
-                .append("asetrate=44100*0.92,aresample=44100")
-                .append("[last_mod];");
-
-        lastNodeLabel = "[last_mod]";
-
-        // 3. Logic nối file (Crossfade Loop)
-        String currentStream = "[0:a]"; // Bắt đầu với file đầu tiên
-
-        if (inputs.size() > 1) {
-            for (int i = 0; i < inputs.size() - 1; i++) {
-                // Input 1: Là file hiện tại (hoặc kết quả nối trước đó)
-                String inputLabel1 = (i == 0) ? "[0:a]" : "[tmp" + i + "]";
-
-                // Input 2:
-                // Nếu đây là lần nối cuối cùng -> Lấy file đã hạ giọng [last_mod]
-                // Nếu chưa phải cuối cùng -> Lấy file tiếp theo [i+1:a]
-                String inputLabel2 = (i == inputs.size() - 2) ? "[last_mod]" : "[" + (i + 1) + ":a]";
-
-                // Output:
-                String outputLabel = "[tmp" + (i + 1) + "]";
-
-                filter.append(inputLabel1)
-                        .append(inputLabel2)
-                        // d=0.04: Crossfade 40ms
-                        .append("acrossfade=d=0.04:c1=tri:c2=tri")
-                        .append(outputLabel)
-                        .append(";");
-
-                currentStream = outputLabel;
-            }
-        } else {
-            // Nếu chỉ có 1 file duy nhất, thì chính file đó là [last_mod]
-            currentStream = "[last_mod]";
-        }
-
-        // Xóa dấu ; thừa nếu có
-        if (filter.length() > 0 && filter.charAt(filter.length() - 1) == ';') {
-            filter.deleteCharAt(filter.length() - 1);
-        }
-
-        // 4. Giai đoạn Hậu kỳ (Post-Processing)
-        // Nối thêm atempo và loudnorm
-        if (filter.length() > 0) filter.append(";");
-
-        filter.append(currentStream)
-                .append("atempo=1.15,loudnorm=I=-16:TP=-1.5:LRA=11")
-                .append("[out_final]");
-
-        cmd.add("-filter_complex");
-        cmd.add(filter.toString());
-
-        cmd.add("-map");
-        cmd.add("[out_final]");
-
-        // 5. Encode Output
-        cmd.add("-c:a"); cmd.add("libmp3lame");
-        cmd.add("-b:a"); cmd.add("192k");
-        cmd.add("-ar"); cmd.add("44100");
-        cmd.add("-avoid_negative_ts"); cmd.add("make_zero");
-
-        cmd.add(outputFilePath);
-
-        // 6. Thực thi
-        try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            if (workingDir != null) pb.directory(workingDir.toFile());
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
-
-            StringBuilder outputLog = new StringBuilder();
-            Thread logger = new Thread(new StreamGobbler(p.getInputStream(), line -> {
-                outputLog.append(line).append(System.lineSeparator());
-            }));
-            logger.start();
-
-            int rc = p.waitFor();
-            logger.join();
-
-            if (rc != 0) {
-                throw new RuntimeException("FFmpeg Error Log:\n" + outputLog.toString());
-            }
-            return outputFilePath;
-
-        } catch (Exception e) {
-            throw new RuntimeException("Lỗi ghép file", e);
-        }
-    }
-
-    private void handleNotFoundWord(String word) {
-        System.out.println("Không tìm thấy từ: " + word);
-        Optional<Words> existed = wordsRepository.findFirstByNameIgnoreCase(word);
-        if (existed.isEmpty()) {
-            Words w = Words.builder()
-                    .fullName(word)
-                    .name(word)
-                    .type("")
-                    .path("")
-                    .build();
-            w.setActive(false);
-
-            wordsRepository.save(w);
-            System.out.println("Đã thêm từ mới với trạng thái inactive: " + word);
-        } else {
-            System.out.println("Từ đã tồn tại trong DB (inactive), không thêm mới: " + word);
-        }
-    }
-
-    private List<String> tokenizeAndSegmentSentence(String sentence, TextToMp3Request.PauseConfig pauses) {
-        if (sentence == null || sentence.isBlank()) {
-            return Collections.emptyList();
-        }
-
-        List<String> tokens = new ArrayList<>();
-        String remainingSentence = sentence; // KHÔNG lowercase để giữ nguyên dấu & spacing
-
-        while (!remainingSentence.isEmpty()) {
-            int originalLength = remainingSentence.length();
-            char firstChar = remainingSentence.charAt(0);
-
-            // 1. Nếu là khoảng trắng → tạo PAUSE từ wordPause
-            if (firstChar == ' ') {
-                double pause = pauses.getWordPause();
-                if (pause > 0) tokens.add("PAUSE:" + pause);
-                remainingSentence = remainingSentence.substring(1);
-                continue;
-            }
-
-            // 2. Nếu là dấu câu → tạo PAUSE
-            Double pauseSec = null;
-
-            switch (firstChar) {
-                case '.': pauseSec = pauses.getDotPause(); break;
-                case ',': pauseSec = pauses.getCommaPause(); break;
-                case ';': pauseSec = pauses.getSemicolonPause(); break;
-                case ':': pauseSec = pauses.getColonPause(); break;
-                case '?': pauseSec = pauses.getQuestionPause(); break;
-                case '!': pauseSec = pauses.getExclamationPause(); break;
-                case '\n':
-                case '\r': pauseSec = pauses.getLineBreakPause(); break;
-                case '(':
-                case ')':
-                case '"':
-                case '“':
-                case '”': pauseSec = pauses.getParenthesisPause(); break;
-            }
-
-            if (pauseSec != null && pauseSec > 0) {
-                tokens.add("PAUSE:" + pauseSec);
-                remainingSentence = remainingSentence.substring(1);
-                continue;
-            }
-
-            // 3. Nếu bắt đầu bằng ký tự là chữ → xử lý từ / từ ghép
-            if (Character.isLetterOrDigit(firstChar) || firstChar == '\'' || firstChar == '’') {
-
-                // Tìm wordEndIndex
-                int wordEndIndex = remainingSentence.length();
-                for (int i = 0; i < remainingSentence.length(); i++) {
-                    char c = remainingSentence.charAt(i);
-                    if (!Character.isLetterOrDigit(c) && c != '\'' && c != '’' && c != ' ') {
-                        wordEndIndex = i;
-                        break;
-                    }
-                }
-
-                String chunk = remainingSentence.substring(0, wordEndIndex);
-                String[] parts = chunk.trim().split("\\s+");
-
-                String wordToken = null;
-                int tokenLength = 0;
-
-                // 3a. Tìm từ ghép
-                for (int n = Math.min(MAX_SEARCH_WORDS, parts.length); n >= 2; n--) {
-                    String candidate = String.join(" ", Arrays.copyOfRange(parts, 0, n));
-                    Optional<Words> opt = wordsRepository.findActiveByName(candidate.toLowerCase());
-                    if (opt.isPresent()) {
-                        wordToken = candidate;
-
-                        // Tính chiều dài thực sự bao gồm khoảng trắng sau
-                        Pattern p = Pattern.compile("^" + Pattern.quote(candidate));
-
-                        Matcher m = p.matcher(remainingSentence);
-                        if (m.find()) tokenLength = m.end();
-                        break;
-                    }
-                }
-
-                // 3b. Nếu không có từ ghép → lấy từ đơn
-                if (wordToken == null) {
-                    wordToken = parts[0];
-
-                    Pattern p = Pattern.compile("^" + Pattern.quote(wordToken));
-                    Matcher m = p.matcher(remainingSentence);
-                    if (m.find()) tokenLength = m.end();
-                    else tokenLength = wordToken.length();
-                }
-
-                // Thêm token
-                tokens.add(wordToken);
-                remainingSentence = remainingSentence.substring(tokenLength);
-                continue;
-            }
-
-            // 4. Nếu không thuộc loại nào → bỏ qua 1 ký tự
-            remainingSentence = remainingSentence.substring(1);
-
-            // Chống infinite loop
-            if (remainingSentence.length() == originalLength) {
-                break;
-            }
-        }
-
-        return tokens;
-    }
-
-    private void processTokenToFiles(
-            String token,
-            String positionType,
-            List<String> inputFiles,
-            List<String> notFoundWords,
-            Set<Path> tempFilesToCleanUp,
-            Path tmpDir) {
-
-        // 1. Tìm token (Có thể là từ ghép hoặc từ đơn)
-        Optional<Words> opt = wordsRepository.findActiveByName(token);
-
-        if (opt.isPresent() && opt.get().getPath() != null && !opt.get().getPath().isEmpty()) {
-            // 1a. TÌM THẤY: Xử lý file audio bình thường (trim & add)
-            String originalPath = opt.get().getPath();
-            try {
-                String trimmedPath = processAudioSegment(originalPath, tmpDir, "mid");
-                inputFiles.add(trimmedPath);
-                tempFilesToCleanUp.add(Paths.get(trimmedPath));
-            } catch (Exception e) {
-                System.err.println("Lỗi khi cắt khoảng lặng cho từ: " + token + ". Bỏ qua.");
-                notFoundWords.add(token);
-                handleNotFoundWord(token);
-            }
-        } else {
-            // 1b. KHÔNG TÌM THẤY: Tách thành các từ đơn để ghép lại
-            String[] subWords = token.trim().split("\\s+");
-            boolean anySubWordFound = false;
-
-            for (int i = 0; i < subWords.length; i++) {
-                String subWord = subWords[i];
-                String subPosition = "mid";
-                if (positionType.equals("start") && i == 0) subPosition = "start";
-                if (positionType.equals("end") && i == subWords.length - 1) subPosition = "end";
-
-                // Tìm từ đơn trong DB
-                Optional<Words> subOpt = wordsRepository.findActiveByName(subWord);
-
-                // Kiểm tra Path không null/rỗng
-                if (subOpt.isPresent() && subOpt.get().getPath() != null && !subOpt.get().getPath().isEmpty()) {
-                    anySubWordFound = true;
-                    String originalPath = subOpt.get().getPath();
-                    try {
-                        // Trim từ đơn
-                        String trimmedPath = processAudioSegment(originalPath, tmpDir, subPosition);
-                        inputFiles.add(trimmedPath);
-                        tempFilesToCleanUp.add(Paths.get(trimmedPath));
-                    } catch (Exception e) {
-                        System.err.println("Lỗi khi cắt khoảng lặng cho từ đơn: " + subWord + ". Bỏ qua.");
-                    }
-
-                    // Thêm PAUSE ngắn giữa các từ đơn để tạo âm thanh tự nhiên hơn
-                    if (i < subWords.length - 1) {
-                        Path silenceFile = createSilenceWavFile(COMPOUND_WORD_SPLIT_PAUSE_SEC);
-                        if (silenceFile != null) {
-                            inputFiles.add(silenceFile.toAbsolutePath().toString());
-                            tempFilesToCleanUp.add(silenceFile);
-                        }
-                    }
-                } else {
-                    // Nếu từ đơn cũng không tìm thấy -> coi đây là lỗi cuối cùng
-                    notFoundWords.add(subWord);
-                    handleNotFoundWord(subWord);
-                }
-            }
-
-            if (anySubWordFound) {
-                System.out.println("Từ ghép không có sẵn, đã ghép từ các từ đơn: " + token);
-            }
-        }
-    }
-
-    // --- HÀM PUBLIC CHÍNH ---
-
     @Override
     public TextToMp3Result textToSpeech(TextToMp3Request req) {
         String sentence = req.getWord().toLowerCase();
-        String baseOutputPath = "D:/BackUp Db/mp3-output";
 
-        if (sentence == null || sentence.trim().isEmpty()) {
-            throw new IllegalArgumentException("Câu đầu vào không được rỗng.");
-        }
-
-        List<String> tokens = tokenizeAndSegmentSentence(sentence, req.getPauses());
-        if (tokens.isEmpty()) {
-            throw new IllegalArgumentException("Không tìm thấy token hợp lệ từ câu đầu vào.");
-        }
-
-        List<String> notFoundWords = new ArrayList<>();
-        List<String> inputFiles = new ArrayList<>();
-        Set<Path> tempFilesToCleanUp = new HashSet<>();
-
-        Path tmpDir = Paths.get(baseOutputPath);
+        // 1. Tạo đường dẫn file tạm
+        String tempDir = System.getProperty("java.io.tmpdir");
+        String fileId = UUID.randomUUID().toString();
+        Path wavPath = Paths.get(tempDir, fileId + ".wav");
+        Path mp3Path = Paths.get(tempDir, fileId + ".mp3");
 
         try {
-            Files.createDirectories(tmpDir);
+            // 2. GỌI PYTHON: Lấy dữ liệu file WAV
+            byte[] wavBytes = callPythonTtsService(sentence);
 
-            for (int i = 0; i < tokens.size(); i++) {
-                String t = tokens.get(i);
-                // A. Xử lý Pause
-                if (t.startsWith("PAUSE:")) {
-                    Double sec = Double.parseDouble(t.substring(6));
-                    Path silenceFile = createSilenceWavFile(sec);
-                    if (silenceFile != null) {
-                        inputFiles.add(silenceFile.toAbsolutePath().toString());
-                        tempFilesToCleanUp.add(silenceFile);
-                    }
-                    continue;
-                }
+            // Lưu file WAV xuống ổ cứng tạm thời
+            Files.write(wavPath, wavBytes);
 
-                // B. Xác định vị trí (Logic thông minh hơn 1 chút để bỏ qua dấu câu)
-                String positionType = "mid";
+            // 3. GỌI FFMPEG: Convert WAV -> MP3
+            if (ffmpegCmdResolved != null) {
+                convertWavToMp3(wavPath.toString(), mp3Path.toString());
 
-                // Nếu là từ đầu tiên (không tính pause đầu nếu có)
-                if (i == 0 || (i == 1 && tokens.get(0).startsWith("PAUSE:"))) {
-                    positionType = "start";
-                }
-                // Nếu là từ cuối cùng
-                else if (i == tokens.size() - 1) {
-                    positionType = "end";
-                }
+                // Đọc file MP3 lên bộ nhớ
+                byte[] mp3Bytes = Files.readAllBytes(mp3Path);
 
-                System.out.println("positionType: " + positionType);
+                // Dọn dẹp file rác
+                cleanupTempFiles(wavPath, mp3Path);
 
-                // Gọi hàm xử lý
-                processTokenToFiles(t, positionType, inputFiles, notFoundWords, tempFilesToCleanUp, tmpDir);
+                // Trả về MP3
+                return new TextToMp3Result(mp3Bytes, new ArrayList<>());
+            } else {
+                // Fallback: Nếu không có FFmpeg thì trả về file WAV gốc luôn
+                System.out.println("WARN: Không tìm thấy FFmpeg, trả về định dạng WAV.");
+                byte[] wavData = Files.readAllBytes(wavPath);
+                cleanupTempFiles(wavPath, null);
+                return new TextToMp3Result(wavData, new ArrayList<>());
             }
 
-            if (inputFiles.isEmpty()) {
-                throw new IllegalStateException("Không có file audio nào để ghép. Vui lòng kiểm tra các từ.");
-            }
-
-            // Tạo file output cuối cùng
-            String resultFileName = "tts_" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS")) + ".mp3";
-            String resultPath = tmpDir.resolve(resultFileName).toAbsolutePath().toString();
-
-            // Ghép file
-            performFfmpegConcatFilterComplex(inputFiles, resultPath, tmpDir);
-
-            byte[] audio = Files.readAllBytes(Paths.get(resultPath));
-            return new TextToMp3Result(audio, notFoundWords);
-
-        } catch (IOException e) {
-            throw new RuntimeException("Lỗi I/O (Đọc/Ghi File)", e);
-        } finally {
-            // Dọn dẹp tất cả file tạm (silence và file trimmed)
-            for (Path p : tempFilesToCleanUp) {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (Exception ignored) { }
-            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            // Dọn dẹp nếu có lỗi
+            cleanupTempFiles(wavPath, mp3Path);
+            throw new RuntimeException("Lỗi xử lý TTS: " + e.getMessage());
         }
+    }
+
+    // --- CÁC HÀM CON (PRIVATE) ---
+
+    private byte[] callPythonTtsService(String text) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            // Tạo JSON body: {"text": "xin chào"}
+            Map<String, Object> body = new HashMap<>();
+            body.put("text", text);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            // Gửi POST request sang localhost:8000
+            ResponseEntity<byte[]> response = restTemplate.postForEntity(pythonServiceUrl, entity, byte[].class);
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                return response.getBody();
+            } else {
+                throw new RuntimeException("Python Service lỗi: " + response.getStatusCode());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Không kết nối được tới Python VITS (Kiểm tra xem run_server.bat đã chạy chưa?): " + e.getMessage());
+        }
+    }
+
+    private void convertWavToMp3(String inputPath, String outputPath) {
+        try {
+            // Lệnh: ffmpeg -y -i input.wav -acodec libmp3lame -q:a 2 output.mp3
+            ProcessBuilder pb = new ProcessBuilder(
+                    ffmpegCmdResolved,
+                    "-y",                   // Ghi đè file nếu tồn tại
+                    "-i", inputPath,        // Input
+                    "-acodec", "libmp3lame",// Codec MP3 chuẩn
+                    "-q:a", "2",            // Chất lượng cao (VBR)
+                    outputPath              // Output
+            );
+
+            pb.redirectErrorStream(true); // Gộp log lỗi vào log thường
+            Process p = pb.start();
+
+            // Đọc log để tránh treo tiến trình (Deadlock)
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    // Uncomment dòng dưới nếu muốn xem log ffmpeg trong console
+                    // System.out.println("[FFmpeg] " + line);
+                }
+            }
+
+            int exitCode = p.waitFor();
+            if (exitCode != 0) {
+                throw new RuntimeException("FFmpeg thất bại với mã lỗi: " + exitCode);
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Lỗi convert MP3: " + e.getMessage());
+        }
+    }
+
+    private void cleanupTempFiles(Path wav, Path mp3) {
+        try {
+            if (wav != null) Files.deleteIfExists(wav);
+            if (mp3 != null) Files.deleteIfExists(mp3);
+        } catch (Exception ignored) {}
     }
 }

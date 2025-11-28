@@ -35,3 +35,15 @@ out/
 
 ### VS Code ###
 .vscode/
+
+# --- Python VITS Service ---
+# Bỏ qua thư mục môi trường ảo (nặng hàng GB)
+vits-service/venv/
+vits-service/.venv/
+
+# Bỏ qua file cache compiled của Python
+**/__pycache__/
+*.py[cod]
+
+# Bỏ qua thư mục cache của HuggingFace (nếu nó lỡ tải vào đây)
+.cache/
