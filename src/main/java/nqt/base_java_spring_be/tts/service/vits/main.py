@@ -1,230 +1,190 @@
 import io
 import json
 import os
+import re
 import torch
 import scipy.io.wavfile
 import uvicorn
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from transformers import VitsModel
 
 # --- CẤU HÌNH ---
-MODEL_NAME = "facebook/mms-tts-vie"
-VOCAB_PATH = "vocab.json"  # File này phải nằm cùng thư mục với main.py
+CONFIG = {
+    "MODEL_NAME": "facebook/mms-tts-vie",
+    "VOCAB_PATH": "vocab.json",
+    "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
+    "SAMPLE_RATE": 16000  # MMS thường là 16k
+}
 
-# Tự động chọn GPU nếu có
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# --- CLASS XỬ LÝ TEXT & LOGIC VITS ---
+class VITSEngine:
+    def __init__(self, config):
+        self.config = config
+        self.device = config["DEVICE"]
+        self.vocab_map = {}
+        self.pad_id = 0
+        self.unk_id = 3
+        self.model = None
 
-app = FastAPI(title="Vietnamese VITS TTS Service (Manual Tokenizer)")
+        self._load_vocab()
+        self._load_model()
 
-print(f"--- Đang khởi tạo VITS Service trên thiết bị: {device} ---")
+    def _load_vocab(self):
+        path = self.config["VOCAB_PATH"]
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"LỖI: Không tìm thấy {path}")
 
-# --- PHẦN 1: LOAD VOCABULARY TỪ FILE JSON LOCAL ---
-try:
-    if not os.path.exists(VOCAB_PATH):
-        raise FileNotFoundError(f"LỖI: Không tìm thấy file '{VOCAB_PATH}'. Hãy đảm bảo file này nằm cùng thư mục code.")
+        print(f"--- Đang tải Vocab từ {path} ---")
+        with open(path, "r", encoding="utf-8") as f:
+            self.vocab_map = json.load(f)
 
-    print(f"--- Đang đọc file từ điển: {VOCAB_PATH} ---")
-    with open(VOCAB_PATH, "r", encoding="utf-8") as f:
-        vocab_map = json.load(f)
+        self.pad_id = self.vocab_map.get("<pad>", 0)
+        self.unk_id = self.vocab_map.get("<unk>", 3)
+        print(f"--- Vocab loaded: {len(self.vocab_map)} tokens ---")
 
-    # Lấy ID của các token đặc biệt
-    PAD_ID = vocab_map.get("<pad>", 0)
-    UNK_ID = vocab_map.get("<unk>", 3)
-    print(f"--- Đã tải {len(vocab_map)} tokens. PAD_ID={PAD_ID}, UNK_ID={UNK_ID} ---")
+    def _load_model(self):
+        print(f"--- Đang tải Model: {self.config['MODEL_NAME']} trên {self.device} ---")
+        self.model = VitsModel.from_pretrained(self.config["MODEL_NAME"]).to(self.device)
+        self.model.eval()
+        # Cập nhật sample rate thực tế từ model config
+        self.config["SAMPLE_RATE"] = self.model.config.sampling_rate
+        print("--- Model Ready! ---")
 
-except Exception as e:
-    print(f"LỖI KHỞI TẠO VOCAB: {str(e)}")
-    raise e
+    def normalize_text(self, text: str) -> str:
+        """Chuẩn hóa văn bản cơ bản: Xóa khoảng trắng thừa, xuống dòng."""
+        if not text: return ""
+        text = text.lower().strip()
+        text = re.sub(r'\s+', ' ', text) # Gộp nhiều dấu cách thành 1
+        return text
 
-# --- PHẦN 2: LOAD MODEL (CHỈ LOAD MODEL, KHÔNG LOAD TOKENIZER) ---
-print(f"--- Đang tải model AI: {MODEL_NAME} ---")
-try:
-    # Chỉ tải phần mạng nơ-ron (Model), không tải AutoTokenizer
-    model = VitsModel.from_pretrained(MODEL_NAME).to(device)
-    model.eval() # Chuyển sang chế độ đánh giá (không train)
-    print("--- Model đã sẵn sàng! ---")
-except Exception as e:
-    print(f"LỖI TẢI MODEL: {str(e)}")
-    raise e
+    def tokenizer(self, text: str):
+        """Chuyển text thành tensor input cho VITS (có chèn PAD_ID)."""
+        text = self.normalize_text(text)
+        char_ids = [self.vocab_map.get(char, self.unk_id) for char in text]
 
-# --- PHẦN 3: HÀM TOKENIZER THỦ CÔNG (CUSTOM FUNCTION) ---
-def manual_tokenizer_vits(text):
-    """
-    Chuyển đổi văn bản thành Tensor input cho mô hình VITS.
-    Quy tắc:
-    1. Chuyển thành ký tự ID dựa trên vocab_map.
-    2. Chèn PAD_ID (0) xen kẽ giữa các ký tự (Interspersed).
-    """
-    if not text:
-        return None
+        # Interspersed: chèn 0 xen kẽ [0, A, 0, B, 0]
+        interspersed_ids = [self.pad_id]
+        for char_id in char_ids:
+            interspersed_ids.extend([char_id, self.pad_id])
 
-    # Chuẩn hóa về chữ thường (vì vocab MMS thường là lowercase)
-    text = text.lower()
+        input_tensor = torch.LongTensor([interspersed_ids])
+        attention_mask = torch.ones_like(input_tensor)
 
-    char_ids = []
+        return {
+            "input_ids": input_tensor.to(self.device),
+            "attention_mask": attention_mask.to(self.device)
+        }
 
-    # Map từng ký tự sang số
-    for char in text:
-        # Nếu ký tự có trong map thì lấy ID, không thì lấy UNK_ID
-        token_id = vocab_map.get(char, UNK_ID)
-        char_ids.append(token_id)
+    @torch.inference_mode()
+    def inference(self, inputs, noise_scale=0.667, length_scale=1.0, noise_scale_w=0.8):
+        model = self.model
+        input_ids = inputs["input_ids"]
+        attention_mask = inputs["attention_mask"]
 
-    # Chèn số 0 xen kẽ (Bắt buộc với VITS)
-    # Ví dụ: [A, B] -> [0, A, 0, B, 0]
-    interspersed_ids = [PAD_ID]
-    for _id in char_ids:
-        interspersed_ids.append(_id)
-        interspersed_ids.append(PAD_ID)
+        if input_ids.dim() > 2: input_ids = input_ids.squeeze(1)
+        if attention_mask.dim() > 2: attention_mask = attention_mask.squeeze(1)
 
-    # Tạo Tensor PyTorch
-    # Thêm chiều batch (dimension 0) -> shape: [1, sequence_length]
-    input_tensor = torch.LongTensor([interspersed_ids])
+        # 1. Text Encoder
+        enc_out = model.text_encoder(input_ids=input_ids, padding_mask=attention_mask.unsqueeze(-1))
+        text_hidden, prior_means, prior_log_variances = enc_out[0], enc_out[1], enc_out[2]
+        text_hidden = text_hidden.transpose(1, 2)
 
-    # Tạo attention_mask (toàn số 1 vì không padding batch)
-    attention_mask = torch.ones_like(input_tensor)
+        # 2. Duration Predictor
+        x_mask = attention_mask.unsqueeze(1)
 
-    return {
-        "input_ids": input_tensor,
-        "attention_mask": attention_mask
-    }
+        # --- SỬ DỤNG noise_scale_w TỪ THAM SỐ ---
+        logw = model.duration_predictor(text_hidden, x_mask, reverse=True, noise_scale=noise_scale_w)
 
-def manual_vits_inference(model, inputs, noise_scale=0.667, length_scale=1.0, noise_scale_w=0.8):
-    input_ids = inputs["input_ids"]
-    attention_mask = inputs["attention_mask"]
+        # --- SỬ DỤNG length_scale TỪ THAM SỐ ---
+        w = torch.exp(logw) * x_mask * length_scale
+        w_ceil = torch.ceil(w)
 
-    if input_ids.dim() > 2:
-        input_ids = input_ids.squeeze(1)
-    if attention_mask.dim() > 2:
-        attention_mask = attention_mask.squeeze(1)
+        y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
+        y_mask = torch.zeros((input_ids.shape[0], 1, y_lengths.max()), dtype=text_hidden.dtype, device=self.device)
+        for i in range(input_ids.shape[0]):
+            y_mask[i, :, :y_lengths[i]] = 1
 
-    enc_out = model.text_encoder(
-        input_ids=input_ids,
-        padding_mask=attention_mask.unsqueeze(-1)
-    )
+        # 3. Upsample & Flow
+        prior_means = prior_means.transpose(1, 2)
+        prior_log_variances = prior_log_variances.transpose(1, 2)
 
-    text_hidden = enc_out[0]
-    prior_means = enc_out[1]
-    prior_log_variances = enc_out[2]
+        durations = w_ceil.squeeze().long()
+        if durations.dim() == 0: durations = durations.unsqueeze(0)
 
-    text_hidden = text_hidden.transpose(1, 2)
+        m_p_upsampled = torch.repeat_interleave(prior_means, durations, dim=2)
+        logs_p_upsampled = torch.repeat_interleave(prior_log_variances, durations, dim=2)
 
-    x_mask = inputs["attention_mask"]
-    if x_mask.dim() > 2: x_mask = x_mask.squeeze(1)
-    x_mask = torch.unsqueeze(x_mask, 1)
+        target_len = y_mask.shape[2]
+        current_len = m_p_upsampled.shape[2]
+        if current_len > target_len:
+            m_p_upsampled = m_p_upsampled[:, :, :target_len]
+            logs_p_upsampled = logs_p_upsampled[:, :, :target_len]
+        elif current_len < target_len:
+            pad_size = target_len - current_len
+            m_p_upsampled = torch.nn.functional.pad(m_p_upsampled, (0, pad_size))
+            logs_p_upsampled = torch.nn.functional.pad(logs_p_upsampled, (0, pad_size))
 
-    logw = model.duration_predictor(
-        text_hidden,
-        x_mask,
-        reverse=True,
-        noise_scale=noise_scale_w
-    )
+        # 4. Decoder
+        # --- SỬ DỤNG noise_scale TỪ THAM SỐ ---
+        z_p = m_p_upsampled + torch.randn_like(m_p_upsampled) * torch.exp(logs_p_upsampled) * noise_scale
+        z = model.flow(z_p, y_mask, reverse=True)
+        waveform = model.decoder(z * y_mask)
 
-    w = torch.exp(logw) * x_mask * length_scale
-    w_ceil = torch.ceil(w)
+        return waveform.squeeze().cpu().float().numpy()
 
-    y_lengths = torch.clamp_min(torch.sum(w_ceil, [1, 2]), 1).long()
-    y_mask = torch.zeros((input_ids.shape[0], 1, y_lengths.max()), dtype=text_hidden.dtype, device=text_hidden.device)
+# --- KHỞI TẠO APP & ENGINE ---
+app = FastAPI(title="Vietnamese VITS TTS Service Optimized")
+tts_engine = None
 
-    for i in range(input_ids.shape[0]):
-        y_mask[i, :, :y_lengths[i]] = 1
-
-    prior_means = prior_means.transpose(1, 2)
-    prior_log_variances = prior_log_variances.transpose(1, 2)
-
-    durations = w_ceil.squeeze().long()
-
-    m_p_upsampled = torch.repeat_interleave(prior_means, durations, dim=2)
-
-    logs_p_upsampled = torch.repeat_interleave(prior_log_variances, durations, dim=2)
-
-    target_len = y_mask.shape[2]
-    current_len = m_p_upsampled.shape[2]
-
-    if current_len > target_len:
-        m_p_upsampled = m_p_upsampled[:, :, :target_len]
-        logs_p_upsampled = logs_p_upsampled[:, :, :target_len]
-    elif current_len < target_len:
-        pad_size = target_len - current_len
-        m_p_upsampled = torch.nn.functional.pad(m_p_upsampled, (0, pad_size))
-        logs_p_upsampled = torch.nn.functional.pad(logs_p_upsampled, (0, pad_size))
-
-    z_p = m_p_upsampled + torch.randn_like(m_p_upsampled) * torch.exp(logs_p_upsampled) * noise_scale
-
-    z = model.flow(z_p, y_mask, reverse=True)
-
-    waveform = model.decoder(z * y_mask)
-
-    return waveform
+@app.on_event("startup")
+def startup_event():
+    global tts_engine
+    tts_engine = VITSEngine(CONFIG)
 
 class TTSRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1, example="Xin chào, kiểm tra tham số.")
 
-# --- CÁC ENDPOINT API ---
+    # length_scale: Tốc độ đọc (Càng nhỏ đọc càng nhanh, càng lớn đọc càng chậm)
+    # Default VITS là 1.0
+    length_scale: float = Field(1.0, ge=0.5, le=2.0, description="Tốc độ (Speed). <1 là nhanh, >1 là chậm.")
 
-@app.get("/")
-def health_check():
-    return {"status": "ok", "message": "VITS Custom Tokenizer Service is running"}
+    # noise_scale: Độ biến thiên của giọng (Cảm xúc/Ngẫu nhiên)
+    # Thấp (0.3): Giọng đều đều, máy móc. Cao (0.8): Giọng biến thiên nhiều, đôi khi lỗi.
+    # Chuẩn: 0.667
+    noise_scale: float = Field(0.667, ge=0.1, le=1.0, description="Độ biến thiên/Cảm xúc âm thanh.")
+
+    # noise_scale_w: Độ biến thiên của nhịp điệu (Rhythm stochastic duration predictor)
+    # Chuẩn: 0.8
+    noise_scale_w: float = Field(0.8, ge=0.1, le=1.0, description="Độ biến thiên nhịp điệu.")
 
 @app.post("/api/v1/tts")
-def generate_speech(req: TTSRequest):
+async def generate_speech(req: TTSRequest):
     try:
-        if not req.text or req.text.strip() == "":
-            raise HTTPException(status_code=400, detail="Vui lòng nhập văn bản")
+        inputs = tts_engine.tokenizer(req.text)
 
-        print(f"Nhận yêu cầu: {req.text}")
-
-        # 1. Sử dụng hàm Tokenizer tự viết
-        inputs = manual_tokenizer_vits(req.text)
-
-        # 2. Đưa dữ liệu sang GPU (nếu có)
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-
-        with torch.no_grad():
-            # --- TÙY CHỈNH NÂNG CAO ---
-            # length_scale=0.8 : Đọc nhanh hơn 20%
-            # length_scale=1.2 : Đọc chậm hơn
-            # noise_scale=0.667 : Giọng chuẩn
-            output = manual_vits_inference(
-                model,
-                inputs,
-                noise_scale=0.667,
-                length_scale=1.0,
-                noise_scale_w=0.8
-            )
-
-        print(f"output_waveform: {output}")
-
-        # 3. Chạy Inference
-        # with torch.no_grad():
-        #     output = model(**inputs).waveform
-        #
-        # print(f"output: {output}")
-        # 4. Xử lý Output Audio
-        audio_data = output.cpu().float().numpy().squeeze()
-
-        # print(f"audio_data: {audio_data}")
-
-        sample_rate = model.config.sampling_rate
-
-        # print(f"sample_rate: {sample_rate}")
-
-        # 5. Ghi vào Buffer bộ nhớ
-        buffer = io.BytesIO()
-        scipy.io.wavfile.write(buffer, rate=sample_rate, data=audio_data)
-        buffer.seek(0)
-        # print(f"buffer: {buffer}")
-
-        return StreamingResponse(
-            buffer,
-            media_type="audio/wav",
-            headers={"Content-Disposition": "attachment; filename=tts_output.wav"}
+        audio_data = tts_engine.inference(
+            inputs,
+            noise_scale=req.noise_scale,
+            length_scale=req.length_scale,
+            noise_scale_w=req.noise_scale_w
         )
 
+        max_val = np.abs(audio_data).max()
+        if max_val > 1.0: audio_data = audio_data / max_val
+        audio_data_int16 = (audio_data * 32767).astype(np.int16)
+
+        buffer = io.BytesIO()
+        scipy.io.wavfile.write(buffer, tts_engine.config["SAMPLE_RATE"], audio_data_int16)
+        buffer.seek(0)
+
+        return StreamingResponse(buffer, media_type="audio/wav")
+
     except Exception as e:
-        print(f"Lỗi xử lý: {str(e)}")
+        print(f"Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
