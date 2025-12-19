@@ -6,6 +6,7 @@ import torch
 import scipy.io.wavfile
 import uvicorn
 import numpy as np
+from contextlib import asynccontextmanager  # <--- MỚI: Dùng cho lifespan
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -16,10 +17,10 @@ CONFIG = {
     "MODEL_NAME": "facebook/mms-tts-vie",
     "VOCAB_PATH": "vocab.json",
     "DEVICE": "cuda" if torch.cuda.is_available() else "cpu",
-    "SAMPLE_RATE": 16000  # MMS thường là 16k
+    "SAMPLE_RATE": 16000
 }
 
-# --- CLASS XỬ LÝ TEXT & LOGIC VITS ---
+# --- CLASS XỬ LÝ TEXT & LOGIC VITS (GIỮ NGUYÊN) ---
 class VITSEngine:
     def __init__(self, config):
         self.config = config
@@ -49,23 +50,19 @@ class VITSEngine:
         print(f"--- Đang tải Model: {self.config['MODEL_NAME']} trên {self.device} ---")
         self.model = VitsModel.from_pretrained(self.config["MODEL_NAME"]).to(self.device)
         self.model.eval()
-        # Cập nhật sample rate thực tế từ model config
         self.config["SAMPLE_RATE"] = self.model.config.sampling_rate
         print("--- Model Ready! ---")
 
     def normalize_text(self, text: str) -> str:
-        """Chuẩn hóa văn bản cơ bản: Xóa khoảng trắng thừa, xuống dòng."""
         if not text: return ""
         text = text.lower().strip()
-        text = re.sub(r'\s+', ' ', text) # Gộp nhiều dấu cách thành 1
+        text = re.sub(r'\s+', ' ', text)
         return text
 
     def tokenizer(self, text: str):
-        """Chuyển text thành tensor input cho VITS (có chèn PAD_ID)."""
         text = self.normalize_text(text)
         char_ids = [self.vocab_map.get(char, self.unk_id) for char in text]
 
-        # Interspersed: chèn 0 xen kẽ [0, A, 0, B, 0]
         interspersed_ids = [self.pad_id]
         for char_id in char_ids:
             interspersed_ids.extend([char_id, self.pad_id])
@@ -87,18 +84,13 @@ class VITSEngine:
         if input_ids.dim() > 2: input_ids = input_ids.squeeze(1)
         if attention_mask.dim() > 2: attention_mask = attention_mask.squeeze(1)
 
-        # 1. Text Encoder
         enc_out = model.text_encoder(input_ids=input_ids, padding_mask=attention_mask.unsqueeze(-1))
         text_hidden, prior_means, prior_log_variances = enc_out[0], enc_out[1], enc_out[2]
         text_hidden = text_hidden.transpose(1, 2)
 
-        # 2. Duration Predictor
         x_mask = attention_mask.unsqueeze(1)
-
-        # --- SỬ DỤNG noise_scale_w TỪ THAM SỐ ---
         logw = model.duration_predictor(text_hidden, x_mask, reverse=True, noise_scale=noise_scale_w)
 
-        # --- SỬ DỤNG length_scale TỪ THAM SỐ ---
         w = torch.exp(logw) * x_mask * length_scale
         w_ceil = torch.ceil(w)
 
@@ -107,7 +99,6 @@ class VITSEngine:
         for i in range(input_ids.shape[0]):
             y_mask[i, :, :y_lengths[i]] = 1
 
-        # 3. Upsample & Flow
         prior_means = prior_means.transpose(1, 2)
         prior_log_variances = prior_log_variances.transpose(1, 2)
 
@@ -127,41 +118,61 @@ class VITSEngine:
             m_p_upsampled = torch.nn.functional.pad(m_p_upsampled, (0, pad_size))
             logs_p_upsampled = torch.nn.functional.pad(logs_p_upsampled, (0, pad_size))
 
-        # 4. Decoder
-        # --- SỬ DỤNG noise_scale TỪ THAM SỐ ---
         z_p = m_p_upsampled + torch.randn_like(m_p_upsampled) * torch.exp(logs_p_upsampled) * noise_scale
         z = model.flow(z_p, y_mask, reverse=True)
         waveform = model.decoder(z * y_mask)
 
         return waveform.squeeze().cpu().float().numpy()
 
-# --- KHỞI TẠO APP & ENGINE ---
-app = FastAPI(title="Vietnamese VITS TTS Service Optimized")
+# --- KHỞI TẠO APP & ENGINE (PHẦN ĐÃ SỬA) ---
+
 tts_engine = None
 
-@app.on_event("startup")
-def startup_event():
+# 1. SỬA: Dùng lifespan thay cho @app.on_event("startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global tts_engine
+    print("--- LIFESPAN: Đang khởi tạo VITSEngine ---")
     tts_engine = VITSEngine(CONFIG)
+    yield
+    print("--- LIFESPAN: Ứng dụng đang tắt, dọn dẹp resource ---")
+    # Nếu cần giải phóng GPU memory:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
+app = FastAPI(
+    title="Vietnamese VITS TTS Service Optimized",
+    lifespan=lifespan  # Đăng ký lifespan vào app
+)
+
+# 2. SỬA: Cập nhật Pydantic Field (bỏ 'example', dùng 'json_schema_extra')
 class TTSRequest(BaseModel):
-    text: str = Field(..., min_length=1, example="Xin chào, kiểm tra tham số.")
+    text: str = Field(
+        ...,
+        min_length=1,
+        json_schema_extra={"example": "Xin chào, kiểm tra tham số."}
+    )
 
-    # length_scale: Tốc độ đọc (Càng nhỏ đọc càng nhanh, càng lớn đọc càng chậm)
-    # Default VITS là 1.0
-    length_scale: float = Field(1.0, ge=0.5, le=2.0, description="Tốc độ (Speed). <1 là nhanh, >1 là chậm.")
+    length_scale: float = Field(
+        1.0, ge=0.5, le=2.0,
+        description="Tốc độ (Speed). <1 là nhanh, >1 là chậm."
+    )
 
-    # noise_scale: Độ biến thiên của giọng (Cảm xúc/Ngẫu nhiên)
-    # Thấp (0.3): Giọng đều đều, máy móc. Cao (0.8): Giọng biến thiên nhiều, đôi khi lỗi.
-    # Chuẩn: 0.667
-    noise_scale: float = Field(0.667, ge=0.1, le=1.0, description="Độ biến thiên/Cảm xúc âm thanh.")
+    noise_scale: float = Field(
+        0.667, ge=0.1, le=1.0,
+        description="Độ biến thiên/Cảm xúc âm thanh."
+    )
 
-    # noise_scale_w: Độ biến thiên của nhịp điệu (Rhythm stochastic duration predictor)
-    # Chuẩn: 0.8
-    noise_scale_w: float = Field(0.8, ge=0.1, le=1.0, description="Độ biến thiên nhịp điệu.")
+    noise_scale_w: float = Field(
+        0.8, ge=0.1, le=1.0,
+        description="Độ biến thiên nhịp điệu."
+    )
 
 @app.post("/api/v1/tts")
 async def generate_speech(req: TTSRequest):
+    if tts_engine is None:
+        raise HTTPException(status_code=503, detail="TTS Engine chưa sẵn sàng")
+
     try:
         inputs = tts_engine.tokenizer(req.text)
 
@@ -187,4 +198,6 @@ async def generate_speech(req: TTSRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    # 3. SỬA: Truyền chuỗi "main:app" để dùng được reload=True mà không warning
+    # Đảm bảo tên file của bạn là main.py
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
