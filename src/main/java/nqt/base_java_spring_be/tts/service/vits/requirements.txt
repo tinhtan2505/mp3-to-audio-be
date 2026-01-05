@@ -11,3 +11,6 @@ google-generativeai
 deep-translator
 soundfile
 torchaudio
+edge-tts
+pydub
+librosa
