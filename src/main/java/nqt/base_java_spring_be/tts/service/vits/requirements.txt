@@ -4,3 +4,10 @@ transformers
 torch
 scipy
 numpy
+openai-whisper
+ffmpeg-python
+pysrt
+google-generativeai
+deep-translator
+soundfile
+torchaudio
