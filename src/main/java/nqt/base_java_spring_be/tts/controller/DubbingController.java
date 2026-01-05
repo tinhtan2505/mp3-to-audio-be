@@ -40,4 +40,19 @@ public class DubbingController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(responseBody);
         }
     }
+
+    @PostMapping("/vi/generate-dubbing-audio")
+    public ResponseEntity<CustomResponse<?>> generateDubbingAudio(@Valid @RequestBody DubbingFileRequest req) {
+        try {
+            // req.getInputPath() ví dụ: "D:\\Dubbing\\pmh_vi.srt"
+            DubbingResult data = dubbingService.generateDubbingAudio(req);
+
+            CustomResponse<DubbingResult> responseBody = CustomResponse.success(data, "Tạo file âm thanh lồng tiếng thành công");
+            return ResponseEntity.ok(responseBody);
+
+        } catch (Exception e) {
+            CustomResponse<?> responseBody = CustomResponse.error("Lỗi tạo audio: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(responseBody);
+        }
+    }
 }
