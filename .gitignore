@@ -47,3 +47,4 @@ vits-service/.venv/
 
 # Bỏ qua thư mục cache của HuggingFace (nếu nó lỡ tải vào đây)
 .cache/
+venv/
