@@ -4,6 +4,7 @@ import uuid
 import asyncio
 import subprocess
 import shutil
+from datetime import datetime
 
 # Thư viện AI & Audio
 import whisper
@@ -56,6 +57,10 @@ class MixRequest(BaseModel):
     voice_dub: str
 
 # --- CÁC HÀM HỖ TRỢ (HELPER FUNCTIONS) ---
+def get_timestamp_str():
+    """Tạo chuỗi thời gian thực: YYYYMMDD_HHMMSS"""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
 async def generate_tts(text, voice, output_file):
     """Sinh file âm thanh từ Edge-TTS"""
     communicate = edge_tts.Communicate(text, voice)
@@ -94,10 +99,11 @@ def api_whisper(req: WhisperRequest):
             raise HTTPException(status_code=400, detail=f"File không tồn tại: {input_path}")
 
         # Xử lý tên file
+        timestamp = get_timestamp_str()
         output_dir = os.path.dirname(input_path)
         filename_no_ext = os.path.splitext(os.path.basename(input_path))[0]
         prefix_name = filename_no_ext.split('_')[0]
-        output_name = f"{prefix_name}_cn"
+        output_name = f"{prefix_name}_cn_{timestamp}"
 
         # Transcribe
         print(f"⏳ Đang chạy mô hình Whisper (Medium)... (Có thể mất vài phút)")
@@ -143,10 +149,11 @@ async def api_tts_gen(req: TtsRequest):
             raise HTTPException(status_code=400, detail=f"File SRT không tồn tại")
 
         # Xử lý tên file Output
+        timestamp = get_timestamp_str()
         output_dir = os.path.dirname(input_srt)
         filename_no_ext = os.path.splitext(os.path.basename(input_srt))[0]
         prefix_name = filename_no_ext.split('_')[0]
-        output_wav_name = f"{prefix_name}_audio_vi.wav"
+        output_wav_name = f"{prefix_name}_audio_vi_{timestamp}.wav"
         output_wav_path = os.path.join(output_dir, output_wav_name)
 
         print("📖 Đang đọc nội dung file subtitle...")
@@ -249,10 +256,11 @@ def api_mix_video(req: MixRequest):
             raise HTTPException(status_code=400, detail="Thiếu file đầu vào")
 
         # Output Name
+        timestamp = get_timestamp_str()
         output_dir = os.path.dirname(video_input)
         filename_no_ext = os.path.splitext(os.path.basename(video_input))[0]
         prefix_name = filename_no_ext.split('_')[0]
-        output_name = f"{prefix_name}_video_vi.mp4"
+        output_name = f"{prefix_name}_video_vi_{timestamp}.mp4"
         output_full_path = os.path.join(output_dir, output_name)
 
         print(f"⚙️ Cấu hình FFmpeg Sidechain Compression:")
