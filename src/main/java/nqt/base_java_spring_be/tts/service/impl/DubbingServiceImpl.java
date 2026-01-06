@@ -2,6 +2,7 @@ package nqt.base_java_spring_be.tts.service.impl;
 
 import nqt.base_java_spring_be.tts.dto.DubbingFileRequest;
 import nqt.base_java_spring_be.tts.dto.DubbingResult;
+import nqt.base_java_spring_be.tts.dto.MixVideoRequest;
 import nqt.base_java_spring_be.tts.service.iservices.DubbingService;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
@@ -23,6 +24,8 @@ public class DubbingServiceImpl implements DubbingService {
     private String pythonDubbingUrl;
     @Value("${app.tts.python-tts-gen-url:http://localhost:8002/api/v1/tts-gen}")
     private String pythonTtsGenUrl;
+    @Value("${app.tts.python-mix-url:http://localhost:8003/api/v1/mix-video}")
+    private String pythonMixUrl;
 
     public DubbingServiceImpl() {
         this.restTemplate = new RestTemplate();
@@ -153,6 +156,58 @@ public class DubbingServiceImpl implements DubbingService {
             }
         } catch (Exception e) {
             throw new RuntimeException("Không kết nối được tới Python Service (Port 8002): " + e.getMessage());
+        }
+    }
+
+    @Override
+    public DubbingResult mixVideo(MixVideoRequest req) {
+        // 1. Validate sơ bộ
+        if (req.getVideoInput() == null || req.getInstrumental() == null || req.getVoiceDub() == null) {
+            throw new RuntimeException("Thiếu đường dẫn file input (Video, Music hoặc Voice)");
+        }
+
+        try {
+            // 2. Chuẩn bị Body gửi sang Python
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            // Map key Java sang key Python (snake_case)
+            Map<String, Object> body = new HashMap<>();
+            body.put("video_input", req.getVideoInput());
+            body.put("instrumental", req.getInstrumental());
+            body.put("voice_dub", req.getVoiceDub());
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            // 3. Gọi Python (Port 8003)
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    pythonMixUrl,
+                    org.springframework.http.HttpMethod.POST,
+                    entity,
+                    new ParameterizedTypeReference<Map<String, Object>>() {}
+            );
+
+            // 4. Xử lý kết quả
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                Map<String, Object> respBody = response.getBody();
+                String status = (String) respBody.get("status");
+
+                if ("success".equalsIgnoreCase(status)) {
+                    String outputFilePath = (String) respBody.get("output_file");
+                    System.out.println("-> Video hoàn chỉnh tại: " + outputFilePath);
+
+                    // Trả về đường dẫn video cuối cùng
+                    return new DubbingResult("", outputFilePath);
+                } else {
+                    throw new RuntimeException("Python Mix lỗi: " + respBody);
+                }
+            } else {
+                throw new RuntimeException("Lỗi kết nối Mix Server: " + response.getStatusCode());
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Lỗi Service Mix: " + e.getMessage());
         }
     }
 }

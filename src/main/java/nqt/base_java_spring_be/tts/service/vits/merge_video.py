@@ -1,70 +1,96 @@
-import subprocess
 import os
+import subprocess
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-# --- CẤU HÌNH FILE ---
-VIDEO_INPUT = "video_goc.mp4"       # Video gốc (chỉ lấy hình)
-INSTRUMENTAL = "instrumental.wav"   # File nhạc nền (đã tách lời)
-VOICE_DUB = "final_dub.wav"         # File giọng đọc AI (đã có tiếng Việt)
-OUTPUT_FILE = "PHIM_LONG_TIENG_PRO.mp4"
+app = FastAPI()
 
-# --- CẤU HÌNH ÂM THANH ---
+# --- CẤU HÌNH ---
 MUSIC_VOLUME = 1.0   # Âm lượng nhạc nền
 VOICE_VOLUME = 1.8   # Âm lượng giọng đọc
-DUCKING_RATIO = 5    # Độ nén nhạc (càng cao nhạc càng nhỏ khi có người nói)
-ATTACK_TIME = 50     # Thời gian bắt đầu nén (ms)
-RELEASE_TIME = 300   # Thời gian nhả nén (ms)
+DUCKING_RATIO = 5    # Độ nén nhạc
+ATTACK_TIME = 50     # ms
+RELEASE_TIME = 300   # ms
 
-def professional_mix_fixed():
-    # Kiểm tra file tồn tại
-    if not all(os.path.exists(f) for f in [VIDEO_INPUT, INSTRUMENTAL, VOICE_DUB]):
-        print("❌ Lỗi: Thiếu file đầu vào! Hãy kiểm tra lại tên file.")
-        return
+class MixRequest(BaseModel):
+    video_input: str    # Video gốc (lấy hình)
+    instrumental: str   # Nhạc nền
+    voice_dub: str      # Giọng đọc AI
 
-    print("🎧 Đang tiến hành hòa âm chuyên nghiệp (SỬA LỖI MẤT GIỌNG)...")
+@app.post("/api/v1/mix-video")
+def mix_video_process(req: MixRequest):
+    video_path = req.video_input
+    music_path = req.instrumental
+    voice_path = req.voice_dub
 
-    # --- GIẢI THÍCH SỬA LỖI ---
-    # Lỗi cũ: Dùng [voice_processed] 2 lần -> FFmpeg báo lỗi hoặc mất tiếng.
-    # Sửa mới: Thêm lệnh 'asplit' để nhân bản giọng đọc thành 2 luồng:
-    #   1. [voice_trigger]: Dùng để ra lệnh nén nhạc.
-    #   2. [voice_mix]: Dùng để trộn vào phim.
+    print(f"\n[PORT 8003] Nhận yêu cầu Mix Video:")
+    print(f" - Video: {video_path}")
+    print(f" - Nhạc : {music_path}")
+    print(f" - Voice: {voice_path}")
 
+    # 1. Kiểm tra file input
+    if not all(os.path.exists(f) for f in [video_path, music_path, voice_path]):
+        raise HTTPException(status_code=400, detail="Một trong các file đầu vào không tồn tại!")
+
+    # 2. Xử lý tên file Output
+    # Input: D:\Dubbing\pmh_video_cn.mp4 -> Output: D:\Dubbing\pmh_video_vi.mp4
+    output_dir = os.path.dirname(video_path)
+    filename_w_ext = os.path.basename(video_path)
+    filename_no_ext = os.path.splitext(filename_w_ext)[0]
+
+    # Lấy phần đầu trước dấu "_" (pmh)
+    prefix_name = filename_no_ext.split('_')[0]
+
+    output_name = f"{prefix_name}_video_vi.mp4"
+    output_full_path = os.path.join(output_dir, output_name)
+
+    # 3. Cấu hình FFmpeg Filter (Sidechain Compression)
+    # Logic: Nhân bản giọng đọc ra 2 luồng, 1 luồng để kích hoạt nén nhạc, 1 luồng để trộn.
     filter_complex = (
-        # 1. Xử lý giọng đọc (Tăng âm lượng + Bass) -> [voice_proc]
-        f"[2:a]volume={VOICE_VOLUME},lowshelf=g=5:f=100:w=0.5[voice_proc];"
-
-        # 2. NHÂN BẢN GIỌNG ĐỌC (Quan trọng nhất)
-        f"[voice_proc]asplit[voice_trigger][voice_mix];"
-
-        # 3. Xử lý nhạc nền -> [bg_ready]
-        f"[1:a]volume={MUSIC_VOLUME}[bg_ready];"
-
-        # 4. Nén nhạc (Dùng voice_trigger để điều khiển) -> [bg_ducked]
-        f"[bg_ready][voice_trigger]sidechaincompress="
+        f"[2:a]volume={VOICE_VOLUME},lowshelf=g=5:f=100:w=0.5[voice_proc];" # Tăng bass + volume giọng
+        f"[voice_proc]asplit[voice_trigger][voice_mix];"                     # Nhân bản giọng
+        f"[1:a]volume={MUSIC_VOLUME}[bg_ready];"                             # Chỉnh volume nhạc
+        f"[bg_ready][voice_trigger]sidechaincompress="                       # Nén nhạc khi có giọng
         f"threshold=0.1:ratio={DUCKING_RATIO}:attack={ATTACK_TIME}:release={RELEASE_TIME}"
         f"[bg_ducked];"
-
-        # 5. Trộn nhạc đã nén + Giọng đọc (voice_mix) -> [audio_out]
-        f"[bg_ducked][voice_mix]amix=inputs=2:duration=longest[audio_out]"
+        f"[bg_ducked][voice_mix]amix=inputs=2:duration=longest[audio_out]"   # Trộn lại
     )
 
     command = [
         "ffmpeg",
-        "-i", VIDEO_INPUT,     # Input 0: Video
-        "-i", INSTRUMENTAL,    # Input 1: Nhạc
-        "-i", VOICE_DUB,       # Input 2: Giọng
+        "-i", video_path,       # Input 0
+        "-i", music_path,       # Input 1
+        "-i", voice_path,       # Input 2
         "-filter_complex", filter_complex,
-        "-map", "0:v",         # Lấy Hình Video
-        "-map", "[audio_out]", # Lấy Tiếng đã trộn
-        "-c:v", "copy",        # Copy hình cho nhanh
-        "-y",                  # Ghi đè file cũ
-        OUTPUT_FILE
+        "-map", "0:v",          # Lấy hình từ video gốc
+        "-map", "[audio_out]",  # Lấy tiếng đã trộn
+        "-c:v", "copy",         # Copy hình (không encode lại -> siêu nhanh)
+        "-c:a", "aac",          # Encode tiếng chuẩn AAC
+        "-b:a", "192k",
+        "-y",                   # Ghi đè
+        output_full_path
     ]
 
     try:
+        print("🎧 Đang chạy FFmpeg...")
+        # Chạy lệnh (ẩn console window trên Windows nếu cần, ở đây để hiện để debug)
         subprocess.run(command, check=True)
-        print(f"\n✅ THÀNH CÔNG! File phim hoàn chỉnh: {OUTPUT_FILE}")
+        print(f"✅ XONG! File tại: {output_full_path}")
+
+        return {
+            "status": "success",
+            "message": "Hòa âm video thành công",
+            "output_file": output_full_path
+        }
+
     except subprocess.CalledProcessError as e:
-        print(f"❌ Có lỗi xảy ra: {e}")
+        print(f"❌ Lỗi FFmpeg: {e}")
+        raise HTTPException(status_code=500, detail="Lỗi khi chạy FFmpeg mix video")
+    except Exception as e:
+        print(f"❌ Lỗi hệ thống: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    professional_mix_fixed()
+    print("Mix Server đang chạy tại http://localhost:8003")
+    uvicorn.run(app, host="0.0.0.0", port=8003)

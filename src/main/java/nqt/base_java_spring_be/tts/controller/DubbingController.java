@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import nqt.base_java_spring_be.dto.CustomResponse;
 import nqt.base_java_spring_be.tts.dto.DubbingFileRequest;
 import nqt.base_java_spring_be.tts.dto.DubbingResult;
+import nqt.base_java_spring_be.tts.dto.MixVideoRequest;
 import nqt.base_java_spring_be.tts.service.iservices.DubbingService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -53,6 +54,21 @@ public class DubbingController {
         } catch (Exception e) {
             CustomResponse<?> responseBody = CustomResponse.error("Lỗi tạo audio: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(responseBody);
+        }
+    }
+
+    @PostMapping("/vi/mix-video")
+    public ResponseEntity<CustomResponse<?>> mixVideo(@RequestBody MixVideoRequest req) {
+        try {
+            // Gọi service xử lý
+            DubbingResult result = dubbingService.mixVideo(req);
+
+            return ResponseEntity.ok(
+                    CustomResponse.success(result, "Hòa âm video thành công")
+            );
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(CustomResponse.error("Lỗi Mix: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
         }
     }
 }
