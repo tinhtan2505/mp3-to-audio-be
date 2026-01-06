@@ -20,11 +20,13 @@ import java.util.Map;
 @Service
 public class DubbingServiceImpl implements DubbingService {
     private final RestTemplate restTemplate;
-    @Value("${app.tts.python-dubbing-url:http://localhost:8001/api/v1/dubbing}")
-    private String pythonDubbingUrl;
-    @Value("${app.tts.python-tts-gen-url:http://localhost:8002/api/v1/tts-gen}")
-    private String pythonTtsGenUrl;
-    @Value("${app.tts.python-mix-url:http://localhost:8003/api/v1/mix-video}")
+    @Value("${app.tts.python-whisper-url}")
+    private String pythonWhisperUrl;
+
+    @Value("${app.tts.python-tts-url}")
+    private String pythonTtsUrl;
+
+    @Value("${app.tts.python-mix-url}")
     private String pythonMixUrl;
 
     public DubbingServiceImpl() {
@@ -81,7 +83,7 @@ public class DubbingServiceImpl implements DubbingService {
             // QUAN TRỌNG: Thay đổi kiểu trả về từ byte[].class sang Map.class
             // Sử dụng ParameterizedTypeReference để hứng JSON
             ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
-                    pythonDubbingUrl,
+                    pythonWhisperUrl,
                     org.springframework.http.HttpMethod.POST,
                     entity,
                     new ParameterizedTypeReference<Map<String, Object>>() {}
@@ -143,7 +145,7 @@ public class DubbingServiceImpl implements DubbingService {
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 
             ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
-                    pythonTtsGenUrl,
+                    pythonTtsUrl,
                     org.springframework.http.HttpMethod.POST,
                     entity,
                     new ParameterizedTypeReference<Map<String, Object>>() {}
