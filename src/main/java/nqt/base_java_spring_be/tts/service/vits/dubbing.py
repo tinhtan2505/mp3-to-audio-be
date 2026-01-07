@@ -20,6 +20,60 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+# --- THƯ VIỆN BỔ SUNG ---
+import torch
+from pyannote.audio import Pipeline
+import huggingface_hub
+
+# --- CẤU HÌNH PYANNOTE ---
+# ⚠️ QUAN TRỌNG: Thay thế bằng Token Hugging Face thực của bạn
+HF_TOKEN = ""
+
+def init_pyannote_engine():
+    """
+    Hàm khởi tạo và kiểm tra kết nối tới Model Diarization.
+    (Đã sửa lỗi xác thực Token)
+    """
+    print("\n" + "="*50)
+    print("🕵️ [INIT] ĐANG KẾT NỐI PYANNOTE AUDIO (DIARIZATION)...")
+
+    start_load = time.time()
+
+    # 1. Kiểm tra thiết bị (GPU/CPU)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"⚙️ [PYANNOTE] Thiết bị sử dụng: {str(device).upper()}")
+
+    if device.type == 'cpu':
+        print("⚠️ CẢNH BÁO: Chạy Pyannote trên CPU sẽ rất chậm (khoảng 10x so với GPU)!")
+
+    try:
+        # 2. Đăng nhập Hugging Face (Cách an toàn nhất)
+        print("🔑 Đang xác thực với Hugging Face...")
+        huggingface_hub.login(use_auth_token=HF_TOKEN)
+
+        # 3. Load Pipeline
+        # Lưu ý: Không truyền tham số use_auth_token hay token vào đây nữa
+        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
+
+        if pipeline is None:
+            raise ValueError("Không thể tải model. Hãy kiểm tra lại mạng hoặc quyền truy cập.")
+
+        # 4. Chuyển model sang GPU nếu có
+        pipeline.to(device)
+
+        load_time = time.time() - start_load
+        print(f"✅ [INIT] LOAD PYANNOTE THÀNH CÔNG ({load_time:.2f}s)")
+        print("="*50 + "\n")
+
+        return pipeline
+
+    except Exception as e:
+        print(f"❌ [INIT] LỖI KHỞI TẠO PYANNOTE: {str(e)}")
+        print("💡 GỢI Ý 1: Đảm bảo bạn đã 'Accept License' model pyannote/speaker-diarization-3.1 trên Hugging Face.")
+        print("💡 GỢI Ý 2: Đảm bảo Token của bạn là loại 'Write' hoặc 'Read' còn hiệu lực.")
+        print("="*50 + "\n")
+        return None
+
 # --- KHỞI TẠO APP & LOAD MODEL ---
 app = FastAPI()
 
@@ -30,6 +84,11 @@ print("⏳ [INIT] ĐANG LOAD MODEL WHISPER (MEDIUM)... Vui lòng chờ!")
 start_load = time.time()
 model = whisper.load_model("medium")
 print(f"✅ [INIT] LOAD MODEL WHISPER THÀNH CÔNG ({time.time() - start_load:.2f}s)")
+diarization_pipeline = init_pyannote_engine()
+
+# Nếu diarization_pipeline là None (lỗi), bạn có thể quyết định dừng server hoặc chạy chế độ không phân biệt người nói.
+if diarization_pipeline is None:
+    print("⚠️ Server sẽ chạy mà không có tính năng phân biệt giọng nói (Diarization).")
 print("="*50 + "\n")
 
 # --- CẤU HÌNH ---
