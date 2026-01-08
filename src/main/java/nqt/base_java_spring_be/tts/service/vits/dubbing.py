@@ -20,6 +20,7 @@ import torch
 import sys
 import warnings
 import torchaudio
+import re
 
 if not hasattr(torchaudio, "get_audio_backend"):
     torchaudio.get_audio_backend = lambda: None
@@ -39,7 +40,6 @@ from pyannote.audio import Pipeline
 import huggingface_hub
 from pyannote.core import Segment
 from transformers import pipeline
-import logging
 
 # --- CẤU HÌNH PYANNOTE ---
 # ⚠️ QUAN TRỌNG: Thay thế bằng Token Hugging Face thực của bạn
@@ -385,6 +385,7 @@ async def api_tts_gen(req: TtsRequest):
 
         # Chuẩn bị mảng âm thanh tổng
         print("🧮 Đang tính toán độ dài Audio tổng...")
+        # Thêm 5 giây buffer vào cuối để tránh bị cắt cụt
         total_seconds = (subs[-1].end.ordinal / 1000) + 5
         total_samples = int(total_seconds * SAMPLE_RATE)
         final_audio = np.zeros(total_samples, dtype=np.float32)
@@ -394,31 +395,38 @@ async def api_tts_gen(req: TtsRequest):
         count_ok = 0
 
         for i, sub in enumerate(subs):
-            text = sub.text.strip()
-            if not text: continue
+            raw_text = sub.text.strip()
+            if not raw_text: continue
 
             start_ms = sub.start.ordinal
             duration_sec = (sub.end.ordinal - sub.start.ordinal) / 1000.0
 
-            # Logic chọn giọng & Clean text
+            # --- LOGIC CHỌN GIỌNG MỚI (CẬP NHẬT) ---
+
+            # 1. Mặc định là giọng Nữ (bao gồm [NU_01], [NU_02] hoặc không có tag)
             voice = VOICE_FEMALE
-            text_upper = text.upper()
-            if any(t in text_upper for t in ["[NAM]", "[M]", "[NAM_CHINH]"]):
+
+            text_upper = raw_text.upper()
+
+            # 2. Kiểm tra nếu là giọng Nam
+            # Logic: Nếu chứa "[NAM" (khớp với NAM_01, NAM_02, NAM_ANY...) hoặc "[M]"
+            if "[NAM" in text_upper or "[M]" in text_upper:
                 voice = VOICE_MALE
-                for t in ["[NAM]", "[M]", "[NAM_CHINH]"]: text = text.replace(t, "")
-            elif any(t in text_upper for t in ["[NU]", "[F]"]):
-                for t in ["[NU]", "[F]"]: text = text.replace(t, "")
 
-            if "]" in text and text.startswith("["): text = text.split("]", 1)[-1].strip()
-            text = text.strip()
-            if not text: continue
+            # 3. Làm sạch text để đọc (Xóa tag [NAM_01], [NU_02]...)
+            # Regex: Tìm chuỗi bắt đầu bằng [, kết thúc bằng ] và thay thế bằng rỗng
+            clean_text = re.sub(r"^\[.*?\]", "", raw_text).strip()
 
-            # print(f"   🔹 Line {i+1}: {text[:30]}...")
+            if not clean_text: continue
+
+            # print(f"   🔹 Line {i+1} ({voice}): {clean_text[:30]}...")
+
+            # --- KẾT THÚC LOGIC CHỌN GIỌNG ---
 
             # Sinh Audio & Ghép
             temp_file = f"temp_{req_id}_{i}.mp3"
             try:
-                await generate_tts(text, voice, temp_file)
+                await generate_tts(clean_text, voice, temp_file)
                 audio_segment = process_audio_segment(temp_file, duration_sec)
 
                 start_sample = int((start_ms / 1000.0) * SAMPLE_RATE)
