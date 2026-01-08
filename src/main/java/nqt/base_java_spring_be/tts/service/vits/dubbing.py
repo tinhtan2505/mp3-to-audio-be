@@ -37,6 +37,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
 
 from pyannote.audio import Pipeline
 import huggingface_hub
+from pyannote.core import Segment
 
 # --- CẤU HÌNH PYANNOTE ---
 # ⚠️ QUAN TRỌNG: Thay thế bằng Token Hugging Face thực của bạn
@@ -157,7 +158,7 @@ def process_audio_segment(file_path, target_duration_sec):
 def align_whisper_with_diarization(whisper_result, diarization_result):
     """
     Hàm trộn kết quả Whisper (Text) và Pyannote (Speaker).
-    Nguyên lý: So khớp thời gian của câu thoại với thời gian người nói xuất hiện.
+    (ĐÃ SỬA LỖI LIBROSA -> PYANNOTE.CORE.SEGMENT)
     """
     segments = whisper_result["segments"]
 
@@ -166,9 +167,13 @@ def align_whisper_with_diarization(whisper_result, diarization_result):
         start = segment["start"]
         end = segment["end"]
 
-        # Tìm xem trong khoảng thời gian (start, end) ai là người nói nhiều nhất
-        # diarization_result.crop(...) trả về các đoạn hội thoại trong khoảng thời gian đó
-        speakers_in_segment = diarization_result.crop(librosa.core.audio.Segment(start, end))
+        # --- ĐOẠN ĐÃ SỬA ---
+        # Tạo khoảng thời gian bằng pyannote.core.Segment (thay vì librosa)
+        t = Segment(start, end)
+
+        # Cắt lấy các lượt nói trong khoảng thời gian này
+        speakers_in_segment = diarization_result.crop(t)
+        # -------------------
 
         # Tìm speaker chiếm thời lượng lớn nhất trong segment này
         dominant_speaker = None
