@@ -1,12 +1,9 @@
 import os
 import time
 import uuid
-import asyncio
 import subprocess
-import shutil
 from datetime import datetime
 
-# Thư viện AI & Audio
 import whisper
 from whisper.utils import get_writer
 import edge_tts
@@ -15,13 +12,29 @@ import librosa
 import soundfile as sf
 import numpy as np
 
-# Thư viện Web Server
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# --- THƯ VIỆN BỔ SUNG ---
 import torch
+import sys
+import warnings
+import torchaudio
+
+if not hasattr(torchaudio, "get_audio_backend"):
+    torchaudio.get_audio_backend = lambda: None
+if not hasattr(torchaudio, "set_audio_backend"):
+    torchaudio.set_audio_backend = lambda x: None
+
+try:
+    import speechbrain.inference
+    sys.modules["speechbrain.pretrained"] = speechbrain.inference
+except ImportError:
+    pass
+
+warnings.filterwarnings("ignore", category=UserWarning, module="pyannote")
+warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
+
 from pyannote.audio import Pipeline
 import huggingface_hub
 
@@ -49,7 +62,7 @@ def init_pyannote_engine():
     try:
         # 2. Đăng nhập Hugging Face (Cách an toàn nhất)
         print("🔑 Đang xác thực với Hugging Face...")
-        huggingface_hub.login(use_auth_token=HF_TOKEN)
+        huggingface_hub.login(token=HF_TOKEN)
 
         # 3. Load Pipeline
         # Lưu ý: Không truyền tham số use_auth_token hay token vào đây nữa
@@ -141,8 +154,45 @@ def process_audio_segment(file_path, target_duration_sec):
         print(f"⚠️ Lỗi xử lý segment audio: {e}")
         return np.zeros(int(target_duration_sec * SAMPLE_RATE))
 
+def align_whisper_with_diarization(whisper_result, diarization_result):
+    """
+    Hàm trộn kết quả Whisper (Text) và Pyannote (Speaker).
+    Nguyên lý: So khớp thời gian của câu thoại với thời gian người nói xuất hiện.
+    """
+    segments = whisper_result["segments"]
+
+    # Duyệt qua từng câu thoại của Whisper
+    for segment in segments:
+        start = segment["start"]
+        end = segment["end"]
+
+        # Tìm xem trong khoảng thời gian (start, end) ai là người nói nhiều nhất
+        # diarization_result.crop(...) trả về các đoạn hội thoại trong khoảng thời gian đó
+        speakers_in_segment = diarization_result.crop(librosa.core.audio.Segment(start, end))
+
+        # Tìm speaker chiếm thời lượng lớn nhất trong segment này
+        dominant_speaker = None
+        max_duration = 0
+
+        for turn, _, speaker in speakers_in_segment.itertracks(yield_label=True):
+            # Tính thời lượng giao nhau giữa câu thoại và lượt nói
+            turn_start = max(start, turn.start)
+            turn_end = min(end, turn.end)
+            duration = turn_end - turn_start
+
+            if duration > max_duration:
+                max_duration = duration
+                dominant_speaker = speaker
+
+        # Nếu tìm thấy người nói, gắn nhãn vào đầu text
+        # Ví dụ: "Xin chào" -> "[SPEAKER_00] Xin chào"
+        if dominant_speaker:
+            segment["text"] = f"[{dominant_speaker}] {segment['text'].strip()}"
+
+    return whisper_result
+
 # ==========================================
-# API 1: WHISPER (AUDIO -> SRT)
+# API 1: WHISPER (AUDIO -> SRT) - CẬP NHẬT DIARIZATION
 # ==========================================
 @app.post("/api/v1/dubbing/whisper")
 def api_whisper(req: WhisperRequest):
@@ -164,17 +214,36 @@ def api_whisper(req: WhisperRequest):
         prefix_name = filename_no_ext.split('_')[0]
         output_name = f"{prefix_name}_cn_{timestamp}"
 
-        # Transcribe
-        print(f"⏳ Đang chạy mô hình Whisper (Medium)... (Có thể mất vài phút)")
+        # 1. Chạy WHISPER (Transcribe)
+        print(f"⏳ [1/2] Đang chạy mô hình Whisper (Medium)...")
         start_time = time.time()
-        result = model.transcribe(input_path, language="zh", fp16=False)
-        process_time = time.time() - start_time
-        print(f"✅ Whisper hoàn tất trong {process_time:.2f} giây.")
+        whisper_result = model.transcribe(input_path, language="zh", fp16=False)
+        print(f"✅ Whisper hoàn tất ({time.time() - start_time:.2f}s).")
 
-        # Xuất SRT
+        # 2. Chạy PYANNOTE (Diarization) - Nếu đã load thành công
+        if diarization_pipeline is not None:
+            print(f"⏳ [2/2] Đang phân tích người nói (Diarization)...")
+            try:
+                # Chuyển audio sang dạng waveform tensor cho pyannote
+                # Lưu ý: Pyannote nhận đường dẫn file trực tiếp
+                diarization_result = diarization_pipeline(input_path)
+
+                print("🔄 Đang ghép thông tin người nói vào văn bản...")
+                # Gọi hàm trộn đã viết ở Bước 1
+                whisper_result = align_whisper_with_diarization(whisper_result, diarization_result)
+                print("✅ Đã gắn nhãn người nói thành công (VD: [SPEAKER_00]).")
+
+            except Exception as e_dia:
+                print(f"⚠️ CẢNH BÁO: Lỗi khi chạy Diarization: {e_dia}")
+                print("   -> Sẽ xuất SRT mà không có phân biệt người nói.")
+        else:
+            print("⚠️ Bỏ qua bước phân tích người nói (Do Pipeline chưa khởi tạo).")
+
+        # 3. Xuất SRT
         print(f"💾 Đang lưu file SRT...")
         writer = get_writer("srt", output_dir)
-        writer(result, output_name)
+        # writer nhận object result đã được sửa text (thêm [SPEAKER_XX])
+        writer(whisper_result, output_name)
 
         full_output_path = os.path.join(output_dir, output_name + ".srt")
         print(f"🎉 [KẾT QUẢ BƯỚC 1] File SRT đã được lưu tại:")
