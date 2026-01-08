@@ -38,6 +38,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="speechbrain")
 from pyannote.audio import Pipeline
 import huggingface_hub
 from pyannote.core import Segment
+from transformers import pipeline
+import logging
 
 # --- CẤU HÌNH PYANNOTE ---
 # ⚠️ QUAN TRỌNG: Thay thế bằng Token Hugging Face thực của bạn
@@ -103,6 +105,11 @@ diarization_pipeline = init_pyannote_engine()
 # Nếu diarization_pipeline là None (lỗi), bạn có thể quyết định dừng server hoặc chạy chế độ không phân biệt người nói.
 if diarization_pipeline is None:
     print("⚠️ Server sẽ chạy mà không có tính năng phân biệt giọng nói (Diarization).")
+
+print("⏳ [INIT] ĐANG LOAD MODEL GENDER CLASSIFICATION (Wav2Vec2)...")
+# Sử dụng model chuyên dụng để phân biệt Nam/Nữ (độ chính xác >90%)
+gender_classifier = pipeline("audio-classification", model="alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech")
+print("✅ [INIT] LOAD MODEL GENDER THÀNH CÔNG")
 print("="*50 + "\n")
 
 # --- CẤU HÌNH ---
@@ -155,10 +162,9 @@ def process_audio_segment(file_path, target_duration_sec):
         print(f"⚠️ Lỗi xử lý segment audio: {e}")
         return np.zeros(int(target_duration_sec * SAMPLE_RATE))
 
-def align_whisper_with_diarization(whisper_result, diarization_result):
+def align_whisper_with_diarization(whisper_result, diarization_result, speaker_map):
     """
-    Hàm trộn kết quả Whisper (Text) và Pyannote (Speaker).
-    (ĐÃ SỬA LỖI LIBROSA -> PYANNOTE.CORE.SEGMENT)
+    Hàm trộn kết quả Whisper và Pyannote, sau đó đổi tên theo Gender Map.
     """
     segments = whisper_result["segments"]
 
@@ -167,20 +173,17 @@ def align_whisper_with_diarization(whisper_result, diarization_result):
         start = segment["start"]
         end = segment["end"]
 
-        # --- ĐOẠN ĐÃ SỬA ---
-        # Tạo khoảng thời gian bằng pyannote.core.Segment (thay vì librosa)
+        # Tạo segment pyannote
         t = Segment(start, end)
 
         # Cắt lấy các lượt nói trong khoảng thời gian này
         speakers_in_segment = diarization_result.crop(t)
-        # -------------------
 
-        # Tìm speaker chiếm thời lượng lớn nhất trong segment này
+        # Tìm speaker chiếm thời lượng lớn nhất
         dominant_speaker = None
         max_duration = 0
 
         for turn, _, speaker in speakers_in_segment.itertracks(yield_label=True):
-            # Tính thời lượng giao nhau giữa câu thoại và lượt nói
             turn_start = max(start, turn.start)
             turn_end = min(end, turn.end)
             duration = turn_end - turn_start
@@ -189,12 +192,93 @@ def align_whisper_with_diarization(whisper_result, diarization_result):
                 max_duration = duration
                 dominant_speaker = speaker
 
-        # Nếu tìm thấy người nói, gắn nhãn vào đầu text
-        # Ví dụ: "Xin chào" -> "[SPEAKER_00] Xin chào"
+        # Nếu tìm thấy người nói -> Đổi tên theo Map -> Gắn vào text
         if dominant_speaker:
-            segment["text"] = f"[{dominant_speaker}] {segment['text'].strip()}"
+            # Lấy tên mới (VD: NAM_01) từ map. Nếu không có thì giữ nguyên SPEAKER_xx
+            final_label = speaker_map.get(dominant_speaker, dominant_speaker)
+            segment["text"] = f"[{final_label}] {segment['text'].strip()}"
 
     return whisper_result
+
+# --- CÁC HÀM HỖ TRỢ AI MỚI ---
+
+def get_gender_from_ai(audio_path, start_sec, duration_sec):
+    """
+    Dùng AI Model (Wav2Vec2) để phán đoán giới tính.
+    Chính xác hơn nhiều so với đo Pitch (Hz).
+    """
+    try:
+        # 1. Cắt đoạn âm thanh tạm thời để đưa vào model
+        # Load 16kHz vì model Wav2Vec2 yêu cầu sample rate này
+        # Chỉ lấy tối đa 3 giây để phân tích cho nhanh và tránh quá tải RAM
+        y, sr = librosa.load(audio_path, sr=16000, offset=start_sec, duration=min(duration_sec, 3.0))
+
+        # Tạo tên file tạm ngẫu nhiên để tránh xung đột
+        temp_segment_path = f"temp_gender_{uuid.uuid4().hex}.wav"
+        sf.write(temp_segment_path, y, 16000)
+
+        # 2. Đưa vào Model AI dự đoán
+        # Result sẽ có dạng list: [{'label': 'female', 'score': 0.99}, ...]
+        result = gender_classifier(temp_segment_path)
+
+        # 3. Xóa file tạm ngay sau khi dùng xong
+        if os.path.exists(temp_segment_path):
+            os.remove(temp_segment_path)
+
+        # 4. Xử lý kết quả
+        top_result = result[0]
+        label = top_result['label'].lower() # 'female' hoặc 'male'
+
+        # Debug nhẹ để xem độ tự tin của model
+        # print(f"      ---> AI Score: {label} ({top_result['score']:.2f})")
+
+        if "female" in label:
+            return "NU"
+        else:
+            return "NAM"
+
+    except Exception as e:
+        print(f"⚠️ Lỗi AI check gender: {e}")
+        # Fallback: Nếu lỗi thì mặc định là Nữ để an toàn
+        return "NU"
+
+def create_speaker_mapping(diarization_result, audio_path):
+    """
+    Tạo bảng map từ SPEAKER_xx -> NAM_xx / NU_xx dùng AI.
+    Ví dụ: {'SPEAKER_00': 'NAM_01', 'SPEAKER_01': 'NU_01'}
+    """
+    speaker_map = {}
+    male_count = 0
+    female_count = 0
+
+    # Lấy danh sách các nhãn người nói (labels) từ Pyannote
+    labels = diarization_result.labels()
+
+    print(f"🔍 Đang dùng AI phân tích giới tính cho {len(labels)} giọng nói...")
+
+    for label in labels:
+        # Lấy timeline các đoạn nói của người này
+        timeline = diarization_result.label_timeline(label)
+
+        # Tìm đoạn nói dài nhất của người này để phân tích cho chính xác nhất
+        longest_segment = max(timeline, key=lambda s: s.duration)
+
+        # --- GỌI HÀM AI ĐÃ VIẾT Ở TRÊN ---
+        gender = get_gender_from_ai(audio_path, longest_segment.start, longest_segment.duration)
+        # ---------------------------------
+
+        # Tạo tên mới (NAM_01, NAM_02...)
+        if gender == "NAM":
+            male_count += 1
+            new_label = f"NAM_{male_count:02d}"
+        else:
+            female_count += 1
+            new_label = f"NU_{female_count:02d}"
+
+        speaker_map[label] = new_label
+        print(f"   🤖 [AI Gender] {label} -> {gender} -> Gán nhãn: {new_label}")
+
+    return speaker_map
 
 # ==========================================
 # API 1: WHISPER (AUDIO -> SRT) - CẬP NHẬT DIARIZATION
@@ -229,17 +313,21 @@ def api_whisper(req: WhisperRequest):
         if diarization_pipeline is not None:
             print(f"⏳ [2/2] Đang phân tích người nói (Diarization)...")
             try:
-                # Chuyển audio sang dạng waveform tensor cho pyannote
-                # Lưu ý: Pyannote nhận đường dẫn file trực tiếp
+                # Chạy Pyannote để tách người nói
                 diarization_result = diarization_pipeline(input_path)
 
-                print("🔄 Đang ghép thông tin người nói vào văn bản...")
-                # Gọi hàm trộn đã viết ở Bước 1
-                whisper_result = align_whisper_with_diarization(whisper_result, diarization_result)
-                print("✅ Đã gắn nhãn người nói thành công (VD: [SPEAKER_00]).")
+                # --- [MỚI] TẠO MAPPING GIỚI TÍNH ---
+                print("🔄 Đang phân tích giới tính bằng AI...")
+                speaker_map = create_speaker_mapping(diarization_result, input_path)
+                # -----------------------------------
+
+                print("🔄 Đang ghép thông tin vào văn bản...")
+                # Truyền thêm speaker_map vào hàm trộn
+                whisper_result = align_whisper_with_diarization(whisper_result, diarization_result, speaker_map)
+                print("✅ Đã gắn nhãn NAM/NU thành công.")
 
             except Exception as e_dia:
-                print(f"⚠️ CẢNH BÁO: Lỗi khi chạy Diarization: {e_dia}")
+                print(f"⚠️ CẢNH BÁO: Lỗi khi chạy Diarization/Gender: {e_dia}")
                 print("   -> Sẽ xuất SRT mà không có phân biệt người nói.")
         else:
             print("⚠️ Bỏ qua bước phân tích người nói (Do Pipeline chưa khởi tạo).")
