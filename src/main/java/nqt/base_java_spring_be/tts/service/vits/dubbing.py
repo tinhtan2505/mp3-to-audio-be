@@ -150,24 +150,38 @@ def check_system_requirements():
     else:
         Logger.error("Chưa cài đặt FFmpeg! (Mix Video sẽ lỗi)")
 
+    # 🔥 DEBUG CUDA CHI TIẾT
+    print("\n🔍 CUDA DEBUG INFO:")
+    print(f"   • torch.__version__: {torch.__version__}")
+    print(f"   • torch.version.cuda: {torch.version.cuda}")
+    print(f"   • torch.cuda.is_available(): {torch.cuda.is_available()}")
+
     if torch.cuda.is_available():
+        print(f"   • torch.cuda.device_count(): {torch.cuda.device_count()}")
+        print(f"   • torch.cuda.get_device_name(0): {torch.cuda.get_device_name(0)}")
+        print(f"   • torch.cuda.current_device(): {torch.cuda.current_device()}")
+
         AI_MODELS["device"] = "cuda"
-        name = torch.cuda.get_device_name(0)
-        Logger.success(f"Phát hiện GPU: {name}")
+        Logger.success(f"✅ Phát hiện GPU: {torch.cuda.get_device_name(0)}")
     else:
         AI_MODELS["device"] = "cpu"
-        Logger.warning("Chạy trên CPU (Sẽ chậm).")
+        Logger.warning("⚠️ Không phát hiện GPU - Chạy trên CPU")
+        print("   💡 Kiểm tra:")
+        print("      1. pip show torch → Có chữ '+cu' không?")
+        print("      2. Đang dùng đúng Python trong .venv chưa?")
+        print("      3. CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%")
 
 def load_ai_models():
     Logger.section("BƯỚC 2: LOAD AI MODELS")
     device = torch.device(AI_MODELS["device"])
+    device_id = 0 if AI_MODELS["device"] == "cuda" else -1
 
     # 1. Whisper
     print("\n⏳ [1/3] Loading Whisper...")
     start = time.time()
     try:
         AI_MODELS["whisper"] = whisper.load_model("medium", device=AI_MODELS["device"])
-        Logger.success("Whisper loaded", time.time() - start)
+        Logger.success(f"Whisper loaded on {AI_MODELS['device'].upper()}", time.time() - start)
     except Exception as e:
         Logger.error("Lỗi Whisper", e)
 
@@ -175,31 +189,59 @@ def load_ai_models():
     print("\n⏳ [2/3] Loading Pyannote...")
     start = time.time()
     try:
-        if not HF_TOKEN: raise ValueError("Thiếu HF_TOKEN")
+        if not HF_TOKEN:
+            raise ValueError("Thiếu HF_TOKEN")
+
         huggingface_hub.login(token=HF_TOKEN)
-        pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1")
-        if pipeline:
-            pipeline.to(device)
-            AI_MODELS["pyannote"] = pipeline
-            Logger.success("Pyannote loaded", time.time() - start)
+
+        # 🔥 FIX: Load với use_auth_token và đảm bảo device là torch.device
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1",
+            use_auth_token=HF_TOKEN
+        )
+
+        # 🔥 FIX: Force tất cả sub-models lên GPU
+        pipeline.to(device)
+
+        # 🔥 FIX: Verify device (Pyannote dùng Inference wrapper)
+        print(f"   📍 Pyannote moved to: {device}")
+
+        AI_MODELS["pyannote"] = pipeline
+        Logger.success(f"Pyannote loaded on {device}", time.time() - start)
+
     except Exception as e:
         Logger.error("Lỗi Pyannote", e)
+        Logger.warning("Hệ thống sẽ chạy không có Speaker Diarization")
 
-    # 3. Gender
+    # 3. Gender Classifier
     print("\n⏳ [3/3] Loading Gender Model...")
     start = time.time()
     try:
-        # 🔥 Chạy trên CPU (-1) để tránh xung đột VRAM hoặc lỗi thư viện
+        # 🔥 FIX: Dùng GPU nếu có, CPU nếu không
         classifier = hf_pipeline(
             "audio-classification",
             model="alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech",
-            device=-1
+            device=device_id  # 0 = GPU, -1 = CPU
         )
         AI_MODELS["gender"] = classifier
-        Logger.success("Gender Model loaded", time.time() - start)
+
+        device_name = "GPU (CUDA)" if device_id == 0 else "CPU"
+        Logger.success(f"Gender Model loaded on {device_name}", time.time() - start)
+
     except Exception as e:
         Logger.error("Lỗi Gender Model", e)
-        Logger.warning("Hệ thống sẽ mặc định giọng Nữ.")
+        Logger.warning("Hệ thống sẽ mặc định giọng Nữ cho tất cả speaker")
+
+    # 🔥 THÊM: In thông tin cuối cùng
+    print("\n" + "="*60)
+    print("📊 TỔNG KẾT THIẾT BỊ:")
+    print(f"   • PyTorch device: {device}")
+    print(f"   • Whisper: {AI_MODELS['device'].upper()}")
+    print(f"   • Pyannote: {'GPU' if device_id == 0 else 'CPU'}")
+    print(f"   • Gender: {'GPU' if device_id == 0 else 'CPU'}")
+    if torch.cuda.is_available():
+        print(f"   • VRAM Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    print("="*60)
 
 # ============================================
 # 4. LIFESPAN
