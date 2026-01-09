@@ -118,11 +118,13 @@ VOICE_FEMALE = "vi-VN-HoaiMyNeural"
 VOICE_MALE = "vi-VN-NamMinhNeural"
 
 # Cấu hình Mix Video
-MUSIC_VOLUME = 1.0
-VOICE_VOLUME = 1.8
-DUCKING_RATIO = 5
-ATTACK_TIME = 50
-RELEASE_TIME = 300
+MUSIC_VOLUME = 0.4
+VOICE_VOLUME = 3
+
+# Cấu hình tự động giảm nhạc khi có giọng nói (Auto Ducking)
+DUCKING_RATIO = 5     # Tỉ lệ nén nhạc (càng cao nhạc càng nhỏ khi có tiếng nói)
+ATTACK_TIME = 50      # Thời gian giảm nhạc (ms)
+RELEASE_TIME = 300    # Thời gian nhạc to lại sau khi dứt câu (ms)
 
 # --- DTO (DATA TRANSFER OBJECTS) ---
 class WhisperRequest(BaseModel):
