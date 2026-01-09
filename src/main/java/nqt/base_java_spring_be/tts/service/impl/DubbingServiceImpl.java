@@ -178,6 +178,11 @@ public class DubbingServiceImpl implements DubbingService {
             body.put("video_input", req.getVideoInput());
             body.put("instrumental", req.getInstrumental());
             body.put("voice_dub", req.getVoiceDub());
+            if (req.getMusicVolume() != null) body.put("music_volume", req.getMusicVolume());
+            if (req.getVoiceVolume() != null) body.put("voice_volume", req.getVoiceVolume());
+            if (req.getDuckingRatio() != null) body.put("ducking_ratio", req.getDuckingRatio());
+            if (req.getAttackTime() != null) body.put("attack_time", req.getAttackTime());
+            if (req.getReleaseTime() != null) body.put("release_time", req.getReleaseTime());
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 

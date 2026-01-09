@@ -117,14 +117,12 @@ SAMPLE_RATE = 24000
 VOICE_FEMALE = "vi-VN-HoaiMyNeural"
 VOICE_MALE = "vi-VN-NamMinhNeural"
 
-# Cấu hình Mix Video
-MUSIC_VOLUME = 0.4
-VOICE_VOLUME = 3
-
-# Cấu hình tự động giảm nhạc khi có giọng nói (Auto Ducking)
-DUCKING_RATIO = 5     # Tỉ lệ nén nhạc (càng cao nhạc càng nhỏ khi có tiếng nói)
-ATTACK_TIME = 50      # Thời gian giảm nhạc (ms)
-RELEASE_TIME = 300    # Thời gian nhạc to lại sau khi dứt câu (ms)
+DEFAULT_SAMPLE_RATE = 24000
+DEFAULT_MUSIC_VOLUME = 0.4
+DEFAULT_VOICE_VOLUME = 3.0
+DEFAULT_DUCKING_RATIO = 5.0 # Tỉ lệ nén nhạc (càng cao nhạc càng nhỏ khi có tiếng nói)
+DEFAULT_ATTACK_TIME = 50    # Thời gian giảm nhạc (ms)
+DEFAULT_RELEASE_TIME = 300  # Thời gian nhạc to lại sau khi dứt câu (ms)
 
 # --- DTO (DATA TRANSFER OBJECTS) ---
 class WhisperRequest(BaseModel):
@@ -494,18 +492,24 @@ def api_mix_video(req: MixRequest):
         output_name = f"{prefix_name}_video_vi_{timestamp}.mp4"
         output_full_path = os.path.join(output_dir, output_name)
 
-        print(f"⚙️ Cấu hình FFmpeg Sidechain Compression:")
-        print(f"   - Voice Volume : {VOICE_VOLUME}")
-        print(f"   - Music Volume : {MUSIC_VOLUME}")
-        print(f"   - Ducking Ratio: {DUCKING_RATIO}")
+        p_music_vol = req.music_volume if req.music_volume is not None else DEFAULT_MUSIC_VOLUME
+        p_voice_vol = req.voice_volume if req.voice_volume is not None else DEFAULT_VOICE_VOLUME
+        p_ducking = req.ducking_ratio if req.ducking_ratio is not None else DEFAULT_DUCKING_RATIO
+        p_attack = req.attack_time if req.attack_time is not None else DEFAULT_ATTACK_TIME
+        p_release = req.release_time if req.release_time is not None else DEFAULT_RELEASE_TIME
 
+        print(f"⚙️ Cấu hình FFmpeg Sidechain Compression:")
+        print(f"   - Voice Volume : {p_voice_vol}")
+        print(f"   - Music Volume : {p_music_vol}")
+        print(f"   - Ducking Ratio: {p_ducking}")
+        print(f"   - Attack/Release: {p_attack}ms / {p_release}ms")
         # FFmpeg Command
         filter_complex = (
-            f"[2:a]volume={VOICE_VOLUME},lowshelf=g=5:f=100:w=0.5[voice_proc];"
+            f"[2:a]volume={p_voice_vol},lowshelf=g=5:f=100:w=0.5[voice_proc];"
             f"[voice_proc]asplit[voice_trigger][voice_mix];"
-            f"[1:a]volume={MUSIC_VOLUME}[bg_ready];"
+            f"[1:a]volume={p_music_vol}[bg_ready];"
             f"[bg_ready][voice_trigger]sidechaincompress="
-            f"threshold=0.1:ratio={DUCKING_RATIO}:attack={ATTACK_TIME}:release={RELEASE_TIME}"
+            f"threshold=0.1:ratio={p_ducking}:attack={p_attack}:release={p_release}"
             f"[bg_ducked];"
             f"[bg_ducked][voice_mix]amix=inputs=2:duration=longest[audio_out]"
         )
