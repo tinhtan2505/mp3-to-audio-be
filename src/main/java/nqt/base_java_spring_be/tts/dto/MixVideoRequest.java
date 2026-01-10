@@ -12,4 +12,9 @@ public class MixVideoRequest {
     private Double duckingRatio;
     private Integer attackTime;
     private Integer releaseTime;
+    private Boolean removeLogo;
+    private Integer logoX;
+    private Integer logoY;
+    private Integer logoW;
+    private Integer logoH;
 }

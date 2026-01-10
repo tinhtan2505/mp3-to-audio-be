@@ -183,6 +183,11 @@ public class DubbingServiceImpl implements DubbingService {
             if (req.getDuckingRatio() != null) body.put("ducking_ratio", req.getDuckingRatio());
             if (req.getAttackTime() != null) body.put("attack_time", req.getAttackTime());
             if (req.getReleaseTime() != null) body.put("release_time", req.getReleaseTime());
+            if (req.getRemoveLogo() != null) body.put("remove_logo", req.getRemoveLogo());
+            if (req.getLogoX() != null) body.put("logo_x", req.getLogoX());
+            if (req.getLogoY() != null) body.put("logo_y", req.getLogoY());
+            if (req.getLogoW() != null) body.put("logo_w", req.getLogoW());
+            if (req.getLogoH() != null) body.put("logo_h", req.getLogoH());
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 

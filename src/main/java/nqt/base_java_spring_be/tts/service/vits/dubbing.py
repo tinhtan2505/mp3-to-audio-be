@@ -324,6 +324,11 @@ class MixRequest(BaseModel):
     ducking_ratio: float = None
     attack_time: int = None
     release_time: int = None
+    remove_logo: bool = False
+    logo_x: int = 20
+    logo_y: int = 30
+    logo_w: int = 250
+    logo_h: int = 40
 
 # --- APIs ---
 @app.post("/api/v1/dubbing/whisper")
@@ -406,26 +411,71 @@ def api_mix(req: MixRequest):
         vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
         out = os.path.join(os.path.dirname(vid), f"out_vi_{get_timestamp_str()}.mp4")
 
+        # Config Audio
         v_vol = req.voice_volume or DEFAULT_VOICE_VOLUME
         m_vol = req.music_volume or DEFAULT_MUSIC_VOLUME
         duck = req.ducking_ratio or DEFAULT_DUCKING_RATIO
         atk = req.attack_time or DEFAULT_ATTACK_TIME
         rel = req.release_time or DEFAULT_RELEASE_TIME
 
-        filter = (f"[2:a]volume={v_vol},lowshelf=g=5:f=100:w=0.5[voice];"
-                  f"[voice]asplit[v_trig][v_mix];"
-                  f"[1:a]volume={m_vol}[bg];"
-                  f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck];"
-                  f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
+        # 1. Tạo Audio Filter Complex
+        audio_filter = (f"[2:a]volume={v_vol},lowshelf=g=5:f=100:w=0.5[voice];"
+                        f"[voice]asplit[v_trig][v_mix];"
+                        f"[1:a]volume={m_vol}[bg];"
+                        f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck];"
+                        f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
 
-        cmd = ["ffmpeg", "-y", "-i", vid, "-i", inst, "-i", voice,
-               "-filter_complex", filter, "-map", "0:v", "-map", "[a_out]",
-               "-c:v", "copy", "-c:a", "aac", out]
+        # 2. Xử lý Video
+        final_filter = audio_filter
+        video_map = "0:v"
+        video_codec = "copy" # Mặc định copy cho nhanh
+
+        # 🔥 SỬ DỤNG THAM SỐ ĐỘNG TỪ REQUEST
+        if req.remove_logo:
+            # Lấy giá trị từ request, nếu bằng 0 hoặc None thì dùng mặc định (fallback an toàn)
+            x = req.logo_x if req.logo_x is not None else 20
+            y = req.logo_y if req.logo_y is not None else 30
+            w = req.logo_w if req.logo_w is not None else 250
+            h = req.logo_h if req.logo_h is not None else 40
+
+            print(f"   🧹 Đang xóa logo với tọa độ ĐỘNG: x={x}, y={y}, w={w}, h={h}")
+
+            # Filter delogo
+            delogo_cmd = f"[0:v]delogo=x={x}:y={y}:w={w}:h={h}[v_out];"
+
+            final_filter = delogo_cmd + audio_filter
+            video_map = "[v_out]"
+            video_codec = "libx264" # Encode lại video
+
+        # 3. Lệnh FFmpeg
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", vid,
+            "-i", inst,
+            "-i", voice,
+            "-filter_complex", final_filter,
+            "-map", video_map,
+            "-map", "[a_out]",
+            "-c:v", video_codec,
+            "-c:a", "aac",
+            "-b:a", "192k",
+        ]
+
+        if video_codec == "libx264":
+            cmd.extend(["-preset", "medium", "-crf", "23"])
+
+        cmd.append(out)
 
         print("   🎬 FFmpeg Processing...")
         subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+
         Logger.success(f"Mix Done: {out}")
         return {"status": "success", "output_file": out}
+
+    except subprocess.CalledProcessError as e:
+        err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
+        Logger.error(f"FFmpeg Error: {err_msg}")
+        raise HTTPException(500, f"FFmpeg Error: {err_msg}")
     except Exception as e:
         Logger.error("Mix Error", e)
         raise HTTPException(500, str(e))
