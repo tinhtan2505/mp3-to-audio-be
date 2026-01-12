@@ -440,7 +440,9 @@ async def api_tts(req: TtsRequest):
                 # Ghép note xử lý vào status
                 full_status = f"{status} | {process_note}" if process_note else status
 
-                print(f"   [{i+1:03d}] {voice_label} | Slot: {dur_slot:.2f}s | Audio: {new_dur:.2f}s | {full_status}")
+                display_text = (clean_txt[:50] + '...') if len(clean_txt) > 50 else clean_txt
+
+                print(f"   [{i+1:03d}] {voice_label} | Slot: {dur_slot:.2f}s | Audio: {new_dur:.2f}s | {full_status} | 📖 {display_text}")
 
                 # 4. Ghép vào Timeline
                 end_sample = start_sample + len(seg)
@@ -460,7 +462,7 @@ async def api_tts(req: TtsRequest):
                 if os.path.exists(tmp): os.remove(tmp)
 
         print("-" * 60)
-        out_name = f"{path.replace('.srt', '')}_audio_pro_mix_{get_timestamp_str()}.wav"
+        out_name = f"{path.replace('.srt', '')}_audio_{get_timestamp_str()}.wav"
         sf.write(out_name, final_audio, SAMPLE_RATE)
 
         Logger.success(f"TTS Hoàn tất: {out_name}")
@@ -474,7 +476,6 @@ async def api_tts(req: TtsRequest):
 def api_mix(req: MixRequest):
     start_time = time.time()
 
-    # Kẻ đường phân cách dễ nhìn
     print("\n" + "="*70)
     print(f"🎬 [START] MIX VIDEO PROCESSING | Time: {get_timestamp_str()}")
     print("="*70)
@@ -489,41 +490,73 @@ def api_mix(req: MixRequest):
         inst = req.instrumental
         voice = req.voice_dub
 
-        # Kiểm tra file tồn tại
+        # Lấy volume cấu hình
+        v_vol = req.voice_volume or DEFAULT_VOICE_VOLUME
+        m_vol = req.music_volume if req.music_volume is not None else DEFAULT_MUSIC_VOLUME
+
+        # Kiểm tra file
         if not os.path.exists(vid): raise FileNotFoundError(f"Không thấy Video: {vid}")
-        if not os.path.exists(inst): raise FileNotFoundError(f"Không thấy Beat: {inst}")
         if not os.path.exists(voice): raise FileNotFoundError(f"Không thấy Voice: {voice}")
+
+        # Chỉ kiểm tra file nhạc nếu m_vol > 0
+        has_music = (m_vol > 0)
+        if has_music and not os.path.exists(inst):
+            print(f"   ⚠️ Không tìm thấy file nhạc '{inst}', tự động chuyển về chế độ KHÔNG NHẠC.")
+            has_music = False
 
         video_dir = os.path.dirname(vid)
         out_filename = f"out_vi_{get_timestamp_str()}.mp4"
         out = os.path.join(video_dir, out_filename)
 
         print(f"   📂 [Video Gốc] : {os.path.basename(vid)}")
-        print(f"   🎵 [Nhạc Nền]  : {os.path.basename(inst)}")
         print(f"   🗣️  [Giọng Đọc] : {os.path.basename(voice)}")
+        if has_music:
+            print(f"   🎵 [Nhạc Nền]  : {os.path.basename(inst)} (Vol: {m_vol})")
+        else:
+            print(f"   🔇 [Nhạc Nền]  : KHÔNG SỬ DỤNG (Vol = 0 hoặc file lỗi)")
+
         print(f"   💾 [File Đích] : {out_filename}")
-        print(f"   📂 [Thư mục]   : {video_dir}")
 
         # =========================================================================
-        # BƯỚC 2: CẤU HÌNH AUDIO FILTER
+        # BƯỚC 2: CẤU HÌNH AUDIO FILTER (LOGIC MỚI 🔥)
         # =========================================================================
-        print("\n🔹 BƯỚC 2: CẤU HÌNH AUDIO (DUCKING & MIX)")
+        print("\n🔹 BƯỚC 2: CẤU HÌNH AUDIO")
 
-        v_vol = req.voice_volume or DEFAULT_VOICE_VOLUME
-        m_vol = req.music_volume or DEFAULT_MUSIC_VOLUME
-        duck = req.ducking_ratio or DEFAULT_DUCKING_RATIO
-        atk = req.attack_time or DEFAULT_ATTACK_TIME
-        rel = req.release_time or DEFAULT_RELEASE_TIME
+        audio_filter = ""
+        ffmpeg_inputs = []
 
-        print(f"   🎚️  Voice Vol: {v_vol} | Music Vol: {m_vol}")
-        print(f"   📉 Ducking Ratio: {duck} | Attack: {atk}ms | Release: {rel}ms")
+        # --- TRƯỜNG HỢP 1: CÓ NHẠC NỀN (Mix + Ducking) ---
+        if has_music:
+            duck = req.ducking_ratio or DEFAULT_DUCKING_RATIO
+            atk = req.attack_time or DEFAULT_ATTACK_TIME
+            rel = req.release_time or DEFAULT_RELEASE_TIME
 
-        # Tạo chuỗi Audio Filter
-        audio_filter = (f"[2:a]volume={v_vol},lowshelf=g=5:f=100:w=0.5[voice];"
-                        f"[voice]asplit[v_trig][v_mix];"
-                        f"[1:a]volume={m_vol}[bg];"
-                        f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck];"
-                        f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
+            print(f"   🎚️  Mode: MIXING (Voice + Music)")
+            print(f"   📉 Ducking Ratio: {duck} | Attack: {atk}ms | Release: {rel}ms")
+
+            # Input: 0=Video, 1=Music, 2=Voice
+            ffmpeg_inputs = ["-i", vid, "-i", inst, "-i", voice]
+
+            audio_filter = (
+                f"[2:a]volume={v_vol},lowshelf=g=5:f=100:w=0.5[voice];"  # Xử lý Voice (Input 2)
+                f"[voice]asplit[v_trig][v_mix];"
+                f"[1:a]volume={m_vol}[bg];"                              # Xử lý Music (Input 1)
+                f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck];"
+                f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]"
+            )
+
+        # --- TRƯỜNG HỢP 2: KHÔNG NHẠC (Chỉ Voice) ---
+        else:
+            print(f"   🎚️  Mode: VOICE ONLY (Bỏ qua nhạc nền)")
+
+            # Input: 0=Video, 1=Voice (Bỏ qua file nhạc)
+            ffmpeg_inputs = ["-i", vid, "-i", voice]
+
+            # Chỉ xử lý Voice và gán thẳng ra [a_out]
+            # Lưu ý: Voice lúc này là Input số 1 (vì không có nhạc ở giữa)
+            audio_filter = (
+                f"[1:a]volume={v_vol},lowshelf=g=5:f=100:w=0.5[a_out]"
+            )
 
         # =========================================================================
         # BƯỚC 3: CẤU HÌNH VIDEO (XÓA LOGO + CHÈN CHỮ)
@@ -531,46 +564,28 @@ def api_mix(req: MixRequest):
         print("\n🔹 BƯỚC 3: CẤU HÌNH VIDEO FILTER")
 
         final_video_filter = ""
-        video_map = "0:v"       # Mặc định lấy video gốc
-        video_codec = "copy"    # Mặc định copy (nhanh)
+        video_map = "0:v"
+        video_codec = "copy"
 
         if req.remove_logo:
             print("   🛡️  [MODE] Xóa Logo & Chèn Branding Text đang BẬT")
 
-            # Lấy thông số
             x = req.logo_x if req.logo_x is not None else 20
             y = req.logo_y if req.logo_y is not None else 30
             w = req.logo_w if req.logo_w is not None else 250
             h = req.logo_h if req.logo_h is not None else 40
             brand_txt = req.branding_text if req.branding_text else "NQT REVIEW"
 
-            print(f"      • Nội dung Text: '{brand_txt}'")
-            print(f"      • Vùng xử lý   : x={x}, y={y}, w={w}, h={h}")
-
-            # --- LOGIC TÌM FONT ---
-            font_cmd_part = ""
+            # Font Logic
+            font_cmd_part = "font='Arial'"
             font_files = [f for f in os.listdir(video_dir) if f.lower().endswith(('.ttf', '.otf'))]
-
             if font_files:
-                # Cách 1: Dùng Custom Font (cần xử lý Path kỹ)
                 raw_path = Path(video_dir) / font_files[0]
-                posix_path = raw_path.as_posix() # Chuyển \ thành /
-                final_font_path = posix_path.replace(":", "\\:") # Escape dấu :
+                posix_path = raw_path.as_posix().replace(":", "\\:")
+                font_cmd_part = f"fontfile='{posix_path}'"
 
-                print(f"      ✅ Phát hiện Font file: {font_files[0]}")
-                print(f"      🔧 Path chuẩn hóa FFmpeg: {final_font_path}")
-                font_cmd_part = f"fontfile='{final_font_path}'"
-            else:
-                # Cách 2: Dùng Font hệ thống (An toàn nhất)
-                print("      ⚠️ Không tìm thấy file .ttf/.otf trong thư mục.")
-                print("      👉 Chuyển sang dùng Font hệ thống: Arial")
-                font_cmd_part = "font='Arial'"
-
-            # Tạo chuỗi lệnh Filter
-            # 1. Delogo
+            # Filter
             delogo_cmd = f"[0:v]delogo=x={x}:y={y}:w={w}:h={h}[v_delogo];"
-
-            # 2. Drawtext (Tính toán căn giữa)
             drawtext_cmd = (
                 f"[v_delogo]drawtext={font_cmd_part}:text='{brand_txt}':"
                 f"fontcolor=white:fontsize=24:box=1:boxcolor=black@0.6:boxborderw=5:"
@@ -579,7 +594,7 @@ def api_mix(req: MixRequest):
 
             final_video_filter = delogo_cmd + drawtext_cmd
             video_map = "[v_branded]"
-            video_codec = "libx264" # Bắt buộc re-encode
+            video_codec = "libx264"
         else:
             print("   ⏩ [SKIP] Không xóa logo -> Giữ nguyên Video Stream gốc.")
 
@@ -588,42 +603,33 @@ def api_mix(req: MixRequest):
         # =========================================================================
         print("\n🔹 BƯỚC 4: BUILD LỆNH FFMPEG")
 
-        # Ghép Filter Complex
         full_complex_filter = (final_video_filter + audio_filter) if final_video_filter else audio_filter
 
-        # Xây dựng mảng lệnh
-        cmd = [
-            "ffmpeg", "-y",             # Overwrite
-            "-i", vid,                  # Input 0: Video
-            "-i", inst,                 # Input 1: Nhạc nền
-            "-i", voice,                # Input 2: Giọng đọc
+        # Xây dựng lệnh cơ bản
+        cmd = ["ffmpeg", "-y"]
+
+        # Thêm các Input (Động)
+        cmd.extend(ffmpeg_inputs)
+
+        # Thêm Filter và Map
+        cmd.extend([
             "-filter_complex", full_complex_filter,
-            "-map", video_map,          # Map Video (Gốc hoặc Đã xử lý)
-            "-map", "[a_out]",          # Map Audio (Đã Mix)
+            "-map", video_map,
+            "-map", "[a_out]",
             "-c:v", video_codec,
             "-c:a", "aac",
             "-b:a", "192k",
-        ]
+        ])
 
         if video_codec == "libx264":
             cmd.extend(["-preset", "medium", "-crf", "23"])
 
         cmd.append(out)
 
-        # 🔥 IN DEBUG QUAN TRỌNG
-        print("-" * 20 + " [DEBUG: FULL COMMAND] " + "-" * 20)
-        # Chuyển list thành string để dễ copy debug
-        cmd_str = " ".join([f'"{c}"' if " " in str(c) else str(c) for c in cmd])
-        print(cmd_str)
-        print("-" * 65)
-
         # =========================================================================
-        # BƯỚC 5: THỰC THI (EXECUTE)
+        # BƯỚC 5: THỰC THI
         # =========================================================================
         print("\n🔹 BƯỚC 5: RUNNING...")
-        print("   🚀 Đang chạy FFmpeg, vui lòng chờ...")
-
-        # Chạy lệnh
         subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
 
         elapsed = time.time() - start_time
@@ -635,20 +641,16 @@ def api_mix(req: MixRequest):
         return {"status": "success", "output_file": out}
 
     except subprocess.CalledProcessError as e:
-        # Decode lỗi FFmpeg ra tiếng người
         err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
-
         print("\n❌ [FFMPEG ERROR DETAILS]")
         print("-" * 50)
-        # Chỉ in 20 dòng cuối của lỗi cho gọn
         print("\n".join(err_msg.splitlines()[-20:]))
         print("-" * 50)
-
         Logger.error("Quá trình Mix thất bại!")
         raise HTTPException(500, f"FFmpeg Error: {err_msg}")
 
     except Exception as e:
-        Logger.error("Lỗi hệ thống (Python Exception)", e)
+        Logger.error("Lỗi hệ thống", e)
         traceback.print_exc()
         raise HTTPException(500, str(e))
 
