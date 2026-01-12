@@ -21,6 +21,7 @@ import torchaudio
 import whisper
 from whisper.utils import get_writer
 import edge_tts
+from pathlib import Path
 
 # 🔥 FIX LỖI IMPORT CŨ: Dùng alias để tránh xung đột
 from transformers import pipeline as hf_pipeline
@@ -268,17 +269,6 @@ async def generate_tts(text, voice, output_file):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_file)
 
-def process_audio_segment(file_path, target_duration_sec):
-    try:
-        y, sr = librosa.load(file_path, sr=SAMPLE_RATE)
-        current_len = len(y) / sr
-        if current_len > target_duration_sec:
-            rate = min(current_len / target_duration_sec, 1.5)
-            y = librosa.effects.time_stretch(y, rate=rate)
-        return y
-    except:
-        return np.zeros(int(target_duration_sec * SAMPLE_RATE))
-
 def get_gender_from_ai(audio_path, start, dur):
     if AI_MODELS["gender"] is None: return "NU"
     try:
@@ -329,6 +319,7 @@ class MixRequest(BaseModel):
     logo_y: int = 30
     logo_w: int = 250
     logo_h: int = 40
+    branding_text: str = "NQT REVIEW"
 
 # --- APIs ---
 @app.post("/api/v1/dubbing/whisper")
@@ -369,93 +360,246 @@ async def api_tts(req: TtsRequest):
         subs = pysrt.open(path)
         if not subs: raise ValueError("SRT rỗng")
 
-        total_len = (subs[-1].end.ordinal/1000) + 5
+        total_len = (subs[-1].end.ordinal/1000) + 10
         final_audio = np.zeros(int(total_len * SAMPLE_RATE), dtype=np.float32)
-        count = 0
 
-        print(f"   🎙️  TTS {len(subs)} câu...")
+        last_end_sample = 0
+
+        print("\n" + "="*60)
+        print(f"🎙️  BẮT ĐẦU TTS (PROACTIVE FITTING MODE)")
+        print(f"   • Chiến thuật: Ưu tiên khớp Slot, hạn chế Dồn toa")
+        print("="*60)
+
         for i, sub in enumerate(subs):
             txt = sub.text.strip().upper()
             if not txt: continue
 
-            voice = VOICE_MALE if ("[NAM" in txt or "[M]" in txt) else VOICE_FEMALE
+            is_male = "[NAM" in txt or "[M]" in txt
+            voice = VOICE_MALE if is_male else VOICE_FEMALE
+            voice_label = "👦 NAM" if is_male else "👩 NỮ "
+
             clean_txt = re.sub(r"^\[.*?\]", "", sub.text).strip()
             if not clean_txt: continue
 
             tmp = f"t_{uuid.uuid4().hex}.mp3"
             try:
+                # 1. Generate TTS
                 await generate_tts(clean_txt, voice, tmp)
-                dur = (sub.end.ordinal - sub.start.ordinal)/1000
-                seg = process_audio_segment(tmp, dur)
 
-                start = int((sub.start.ordinal/1000)*SAMPLE_RATE)
-                end = start + len(seg)
-                if end > len(final_audio):
-                    final_audio = np.concatenate((final_audio, np.zeros(end-len(final_audio))))
-                final_audio[start:end] += seg
-                count += 1
+                # 2. Load & Trim Silence
+                raw_y, _ = librosa.load(tmp, sr=SAMPLE_RATE)
+                seg, _ = librosa.effects.trim(raw_y, top_db=30)
+
+                # --- 🔥 LOGIC XỬ LÝ THÔNG MINH MỚI ---
+
+                # Tính thời lượng Audio gốc và Slot cho phép
+                dur_audio = len(seg) / SAMPLE_RATE
+                dur_slot = (sub.end.ordinal - sub.start.ordinal) / 1000
+
+                # Tính tỷ lệ cần thiết để nhét vừa Slot
+                # Ví dụ: Audio 5s, Slot 4s -> ratio = 1.25 (Cần tua 1.25x)
+                ratio = dur_audio / dur_slot
+
+                process_note = ""
+                final_rate = 1.0
+
+                # Logic Quyết định Tốc độ:
+                if ratio <= 1.0:
+                    # Trường hợp 1: Audio ngắn hơn Slot -> Giữ nguyên, rất tốt
+                    final_rate = 1.0
+                elif ratio <= 1.35:
+                    # Trường hợp 2: Dài hơn một chút (<= 35%) -> Ép cho vừa khít luôn!
+                    final_rate = ratio
+                    process_note = f"⚡ FIT {final_rate:.2f}x"
+                else:
+                    # Trường hợp 3: Quá dài (> 35%) -> Chỉ tua max 1.35x để giữ chất giọng
+                    # Phần thừa còn lại chấp nhận bị Tràn/Trễ
+                    final_rate = 1.35
+                    process_note = f"🚀 MAX {final_rate:.2f}x"
+
+                # Thực hiện Time Stretch nếu cần
+                if final_rate > 1.01: # Sai số nhỏ thì bỏ qua
+                    seg = librosa.effects.time_stretch(seg, rate=final_rate)
+
+                # --- TÍNH TOÁN VỊ TRÍ (Sau khi đã co giãn) ---
+                original_start_sample = int((sub.start.ordinal/1000) * SAMPLE_RATE)
+                start_sample = max(original_start_sample, last_end_sample)
+
+                # Tính lại thông số để Log
+                new_dur = len(seg) / SAMPLE_RATE
+                shift_seconds = (start_sample - original_start_sample) / SAMPLE_RATE
+
+                # Status Log
+                if shift_seconds > 0.1:
+                    status = f"⏩ TRỄ {shift_seconds:.2f}s"
+                elif new_dur > dur_slot + 0.1: # Cho phép dư xíu
+                    status = f"⚠️ DƯ {new_dur - dur_slot:.2f}s"
+                else:
+                    status = "✅ OK"
+
+                # Ghép note xử lý vào status
+                full_status = f"{status} | {process_note}" if process_note else status
+
+                print(f"   [{i+1:03d}] {voice_label} | Slot: {dur_slot:.2f}s | Audio: {new_dur:.2f}s | {full_status}")
+
+                # 4. Ghép vào Timeline
+                end_sample = start_sample + len(seg)
+
+                if end_sample > len(final_audio):
+                    padding = np.zeros(end_sample - len(final_audio) + SAMPLE_RATE, dtype=np.float32)
+                    final_audio = np.concatenate((final_audio, padding))
+
+                final_audio[start_sample:end_sample] += seg
+
+                # Cập nhật mốc kết thúc (+0.05s nghỉ ít hơn để tiết kiệm chỗ)
+                last_end_sample = end_sample + int(0.05 * SAMPLE_RATE)
+
+            except Exception as e:
+                print(f"❌ Lỗi câu {i}: {e}")
             finally:
                 if os.path.exists(tmp): os.remove(tmp)
 
-        out_name = f"{path.replace('.srt', '')}_audio_vi_{get_timestamp_str()}.wav"
+        print("-" * 60)
+        out_name = f"{path.replace('.srt', '')}_audio_pro_mix_{get_timestamp_str()}.wav"
         sf.write(out_name, final_audio, SAMPLE_RATE)
-        Logger.success(f"TTS Done: {out_name}")
+
+        Logger.success(f"TTS Hoàn tất: {out_name}")
         return {"status": "success", "output_file": out_name}
+
     except Exception as e:
         Logger.error("TTS Error", e)
         raise HTTPException(500, str(e))
 
 @app.post("/api/v1/dubbing/mix-video")
 def api_mix(req: MixRequest):
-    try:
-        vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
-        out = os.path.join(os.path.dirname(vid), f"out_vi_{get_timestamp_str()}.mp4")
+    start_time = time.time()
 
-        # Config Audio
+    # Kẻ đường phân cách dễ nhìn
+    print("\n" + "="*70)
+    print(f"🎬 [START] MIX VIDEO PROCESSING | Time: {get_timestamp_str()}")
+    print("="*70)
+
+    try:
+        # =========================================================================
+        # BƯỚC 1: KIỂM TRA INPUT & PATHS
+        # =========================================================================
+        print("\n🔹 BƯỚC 1: CHUẨN BỊ FILE INPUT")
+
+        vid = req.video_input
+        inst = req.instrumental
+        voice = req.voice_dub
+
+        # Kiểm tra file tồn tại
+        if not os.path.exists(vid): raise FileNotFoundError(f"Không thấy Video: {vid}")
+        if not os.path.exists(inst): raise FileNotFoundError(f"Không thấy Beat: {inst}")
+        if not os.path.exists(voice): raise FileNotFoundError(f"Không thấy Voice: {voice}")
+
+        video_dir = os.path.dirname(vid)
+        out_filename = f"out_vi_{get_timestamp_str()}.mp4"
+        out = os.path.join(video_dir, out_filename)
+
+        print(f"   📂 [Video Gốc] : {os.path.basename(vid)}")
+        print(f"   🎵 [Nhạc Nền]  : {os.path.basename(inst)}")
+        print(f"   🗣️  [Giọng Đọc] : {os.path.basename(voice)}")
+        print(f"   💾 [File Đích] : {out_filename}")
+        print(f"   📂 [Thư mục]   : {video_dir}")
+
+        # =========================================================================
+        # BƯỚC 2: CẤU HÌNH AUDIO FILTER
+        # =========================================================================
+        print("\n🔹 BƯỚC 2: CẤU HÌNH AUDIO (DUCKING & MIX)")
+
         v_vol = req.voice_volume or DEFAULT_VOICE_VOLUME
         m_vol = req.music_volume or DEFAULT_MUSIC_VOLUME
         duck = req.ducking_ratio or DEFAULT_DUCKING_RATIO
         atk = req.attack_time or DEFAULT_ATTACK_TIME
         rel = req.release_time or DEFAULT_RELEASE_TIME
 
-        # 1. Tạo Audio Filter Complex
+        print(f"   🎚️  Voice Vol: {v_vol} | Music Vol: {m_vol}")
+        print(f"   📉 Ducking Ratio: {duck} | Attack: {atk}ms | Release: {rel}ms")
+
+        # Tạo chuỗi Audio Filter
         audio_filter = (f"[2:a]volume={v_vol},lowshelf=g=5:f=100:w=0.5[voice];"
                         f"[voice]asplit[v_trig][v_mix];"
                         f"[1:a]volume={m_vol}[bg];"
                         f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck];"
                         f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
 
-        # 2. Xử lý Video
-        final_filter = audio_filter
-        video_map = "0:v"
-        video_codec = "copy" # Mặc định copy cho nhanh
+        # =========================================================================
+        # BƯỚC 3: CẤU HÌNH VIDEO (XÓA LOGO + CHÈN CHỮ)
+        # =========================================================================
+        print("\n🔹 BƯỚC 3: CẤU HÌNH VIDEO FILTER")
 
-        # 🔥 SỬ DỤNG THAM SỐ ĐỘNG TỪ REQUEST
+        final_video_filter = ""
+        video_map = "0:v"       # Mặc định lấy video gốc
+        video_codec = "copy"    # Mặc định copy (nhanh)
+
         if req.remove_logo:
-            # Lấy giá trị từ request, nếu bằng 0 hoặc None thì dùng mặc định (fallback an toàn)
+            print("   🛡️  [MODE] Xóa Logo & Chèn Branding Text đang BẬT")
+
+            # Lấy thông số
             x = req.logo_x if req.logo_x is not None else 20
             y = req.logo_y if req.logo_y is not None else 30
             w = req.logo_w if req.logo_w is not None else 250
             h = req.logo_h if req.logo_h is not None else 40
+            brand_txt = req.branding_text if req.branding_text else "NQT REVIEW"
 
-            print(f"   🧹 Đang xóa logo với tọa độ ĐỘNG: x={x}, y={y}, w={w}, h={h}")
+            print(f"      • Nội dung Text: '{brand_txt}'")
+            print(f"      • Vùng xử lý   : x={x}, y={y}, w={w}, h={h}")
 
-            # Filter delogo
-            delogo_cmd = f"[0:v]delogo=x={x}:y={y}:w={w}:h={h}[v_out];"
+            # --- LOGIC TÌM FONT ---
+            font_cmd_part = ""
+            font_files = [f for f in os.listdir(video_dir) if f.lower().endswith(('.ttf', '.otf'))]
 
-            final_filter = delogo_cmd + audio_filter
-            video_map = "[v_out]"
-            video_codec = "libx264" # Encode lại video
+            if font_files:
+                # Cách 1: Dùng Custom Font (cần xử lý Path kỹ)
+                raw_path = Path(video_dir) / font_files[0]
+                posix_path = raw_path.as_posix() # Chuyển \ thành /
+                final_font_path = posix_path.replace(":", "\\:") # Escape dấu :
 
-        # 3. Lệnh FFmpeg
+                print(f"      ✅ Phát hiện Font file: {font_files[0]}")
+                print(f"      🔧 Path chuẩn hóa FFmpeg: {final_font_path}")
+                font_cmd_part = f"fontfile='{final_font_path}'"
+            else:
+                # Cách 2: Dùng Font hệ thống (An toàn nhất)
+                print("      ⚠️ Không tìm thấy file .ttf/.otf trong thư mục.")
+                print("      👉 Chuyển sang dùng Font hệ thống: Arial")
+                font_cmd_part = "font='Arial'"
+
+            # Tạo chuỗi lệnh Filter
+            # 1. Delogo
+            delogo_cmd = f"[0:v]delogo=x={x}:y={y}:w={w}:h={h}[v_delogo];"
+
+            # 2. Drawtext (Tính toán căn giữa)
+            drawtext_cmd = (
+                f"[v_delogo]drawtext={font_cmd_part}:text='{brand_txt}':"
+                f"fontcolor=white:fontsize=24:box=1:boxcolor=black@0.6:boxborderw=5:"
+                f"x={x}+(({w}-text_w)/2):y={y}+(({h}-text_h)/2)[v_branded];"
+            )
+
+            final_video_filter = delogo_cmd + drawtext_cmd
+            video_map = "[v_branded]"
+            video_codec = "libx264" # Bắt buộc re-encode
+        else:
+            print("   ⏩ [SKIP] Không xóa logo -> Giữ nguyên Video Stream gốc.")
+
+        # =========================================================================
+        # BƯỚC 4: TỔNG HỢP LỆNH FFMPEG
+        # =========================================================================
+        print("\n🔹 BƯỚC 4: BUILD LỆNH FFMPEG")
+
+        # Ghép Filter Complex
+        full_complex_filter = (final_video_filter + audio_filter) if final_video_filter else audio_filter
+
+        # Xây dựng mảng lệnh
         cmd = [
-            "ffmpeg", "-y",
-            "-i", vid,
-            "-i", inst,
-            "-i", voice,
-            "-filter_complex", final_filter,
-            "-map", video_map,
-            "-map", "[a_out]",
+            "ffmpeg", "-y",             # Overwrite
+            "-i", vid,                  # Input 0: Video
+            "-i", inst,                 # Input 1: Nhạc nền
+            "-i", voice,                # Input 2: Giọng đọc
+            "-filter_complex", full_complex_filter,
+            "-map", video_map,          # Map Video (Gốc hoặc Đã xử lý)
+            "-map", "[a_out]",          # Map Audio (Đã Mix)
             "-c:v", video_codec,
             "-c:a", "aac",
             "-b:a", "192k",
@@ -466,18 +610,46 @@ def api_mix(req: MixRequest):
 
         cmd.append(out)
 
-        print("   🎬 FFmpeg Processing...")
+        # 🔥 IN DEBUG QUAN TRỌNG
+        print("-" * 20 + " [DEBUG: FULL COMMAND] " + "-" * 20)
+        # Chuyển list thành string để dễ copy debug
+        cmd_str = " ".join([f'"{c}"' if " " in str(c) else str(c) for c in cmd])
+        print(cmd_str)
+        print("-" * 65)
+
+        # =========================================================================
+        # BƯỚC 5: THỰC THI (EXECUTE)
+        # =========================================================================
+        print("\n🔹 BƯỚC 5: RUNNING...")
+        print("   🚀 Đang chạy FFmpeg, vui lòng chờ...")
+
+        # Chạy lệnh
         subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
 
-        Logger.success(f"Mix Done: {out}")
+        elapsed = time.time() - start_time
+        print("\n" + "="*70)
+        Logger.success(f"XỬ LÝ THÀNH CÔNG!", elapsed)
+        print(f"   👉 KẾT QUẢ: {out}")
+        print("="*70 + "\n")
+
         return {"status": "success", "output_file": out}
 
     except subprocess.CalledProcessError as e:
-        err_msg = e.stderr.decode('utf-8') if e.stderr else str(e)
-        Logger.error(f"FFmpeg Error: {err_msg}")
+        # Decode lỗi FFmpeg ra tiếng người
+        err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
+
+        print("\n❌ [FFMPEG ERROR DETAILS]")
+        print("-" * 50)
+        # Chỉ in 20 dòng cuối của lỗi cho gọn
+        print("\n".join(err_msg.splitlines()[-20:]))
+        print("-" * 50)
+
+        Logger.error("Quá trình Mix thất bại!")
         raise HTTPException(500, f"FFmpeg Error: {err_msg}")
+
     except Exception as e:
-        Logger.error("Mix Error", e)
+        Logger.error("Lỗi hệ thống (Python Exception)", e)
+        traceback.print_exc()
         raise HTTPException(500, str(e))
 
 if __name__ == "__main__":
