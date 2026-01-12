@@ -360,116 +360,148 @@ async def api_tts(req: TtsRequest):
         subs = pysrt.open(path)
         if not subs: raise ValueError("SRT rỗng")
 
-        total_len = (subs[-1].end.ordinal/1000) + 10
-        final_audio = np.zeros(int(total_len * SAMPLE_RATE), dtype=np.float32)
+        # Tạo buffer tổng (ước lượng)
+        total_seconds = (subs[-1].end.ordinal / 1000.0) + 20.0
+        final_audio = np.zeros(int(total_seconds * SAMPLE_RATE), dtype=np.float32)
 
         last_end_sample = 0
+        SAFETY_GAP = 0.1  # Giữ khoảng cách 0.1s giữa các câu để không dính chùm
 
-        print("\n" + "="*60)
-        print(f"🎙️  BẮT ĐẦU TTS (PROACTIVE FITTING MODE)")
-        print(f"   • Chiến thuật: Ưu tiên khớp Slot, hạn chế Dồn toa")
-        print("="*60)
+        print("\n" + "="*80)
+        print(f"🎙️  SMART TTS GENERATOR (GAP BORROWING MODE)")
+        print(f"   • Input: {os.path.basename(path)}")
+        print(f"   • Logic: Tận dụng khoảng lặng (Gap) để hạn chế tua tiếng")
+        print("="*80)
 
         for i, sub in enumerate(subs):
-            txt = sub.text.strip().upper()
-            if not txt: continue
-
-            is_male = "[NAM" in txt or "[M]" in txt
-            voice = VOICE_MALE if is_male else VOICE_FEMALE
-            voice_label = "👦 NAM" if is_male else "👩 NỮ "
-
-            clean_txt = re.sub(r"^\[.*?\]", "", sub.text).strip()
+            # 1. Lọc text
+            txt_raw = sub.text.strip()
+            clean_txt = re.sub(r"^\[.*?\]", "", txt_raw).strip()
             if not clean_txt: continue
 
-            tmp = f"t_{uuid.uuid4().hex}.mp3"
+            # 2. Xác định Voice
+            is_male = "[NAM" in txt_raw.upper() or "[M]" in txt_raw.upper()
+            voice = VOICE_MALE if is_male else VOICE_FEMALE
+            voice_icon = "👦" if is_male else "👩"
+
+            # 3. Tính toán thời gian (Time Calculation)
+            start_seconds = sub.start.ordinal / 1000.0
+            end_seconds = sub.end.ordinal / 1000.0
+            slot_duration = end_seconds - start_seconds
+
+            # --- 🔥 LOGIC XÁC ĐỊNH GIỚI HẠN (HARD LIMIT) ---
+            # Giới hạn là thời điểm bắt đầu của câu TIẾP THEO (trừ đi safety gap)
+            if i < len(subs) - 1:
+                next_start = subs[i+1].start.ordinal / 1000.0
+                hard_limit = next_start - SAFETY_GAP
+                gap_info = f"Next sub at {next_start}s"
+            else:
+                hard_limit = end_seconds + 5.0 # Câu cuối thả ga
+                gap_info = "Last sentence"
+
+            # Đảm bảo Hard Limit không được nhỏ hơn thời gian kết thúc gốc (đề phòng sub lỗi)
+            hard_limit = max(hard_limit, end_seconds)
+
+            # Xác định điểm bắt đầu thực tế (Nếu câu trước bị trễ, câu này phải trễ theo)
+            actual_start_sample = max(int(start_seconds * SAMPLE_RATE), last_end_sample)
+            actual_start_seconds = actual_start_sample / SAMPLE_RATE
+
+            # KHOẢNG TRỐNG TỐI ĐA CHO PHÉP (Available Space)
+            available_space = hard_limit - actual_start_seconds
+
+            tmp_file = f"temp_{uuid.uuid4().hex}.mp3"
+
             try:
-                # 1. Generate TTS
-                await generate_tts(clean_txt, voice, tmp)
+                # 4. Generate TTS & Trim
+                await generate_tts(clean_txt, voice, tmp_file)
+                y, _ = librosa.load(tmp_file, sr=SAMPLE_RATE)
+                y_trimmed, _ = librosa.effects.trim(y, top_db=30)
 
-                # 2. Load & Trim Silence
-                raw_y, _ = librosa.load(tmp, sr=SAMPLE_RATE)
-                seg, _ = librosa.effects.trim(raw_y, top_db=30)
+                audio_duration = len(y_trimmed) / SAMPLE_RATE
 
-                # --- 🔥 LOGIC XỬ LÝ THÔNG MINH MỚI ---
-
-                # Tính thời lượng Audio gốc và Slot cho phép
-                dur_audio = len(seg) / SAMPLE_RATE
-                dur_slot = (sub.end.ordinal - sub.start.ordinal) / 1000
-
-                # Tính tỷ lệ cần thiết để nhét vừa Slot
-                # Ví dụ: Audio 5s, Slot 4s -> ratio = 1.25 (Cần tua 1.25x)
-                ratio = dur_audio / dur_slot
-
-                process_note = ""
+                # 5. So sánh & Quyết định Tốc độ (Decision Logic)
                 final_rate = 1.0
+                action_log = ""
+                status_icon = "✅"
 
-                # Logic Quyết định Tốc độ:
-                if ratio <= 1.0:
-                    # Trường hợp 1: Audio ngắn hơn Slot -> Giữ nguyên, rất tốt
+                # Case A: Audio ngắn hơn Slot gốc -> Quá tốt
+                if audio_duration <= slot_duration:
                     final_rate = 1.0
-                elif ratio <= 1.35:
-                    # Trường hợp 2: Dài hơn một chút (<= 35%) -> Ép cho vừa khít luôn!
-                    final_rate = ratio
-                    process_note = f"⚡ FIT {final_rate:.2f}x"
+                    status_icon = "✨ PERFECT"
+                    action_log = "Vừa khít slot gốc"
+
+                # Case B: Audio dài hơn Slot gốc NHƯNG ngắn hơn Khoảng trống cho phép -> MƯỢN GAP
+                elif audio_duration <= available_space:
+                    final_rate = 1.0
+                    status_icon = "👌 BORROW"
+                    borrow_time = audio_duration - slot_duration
+                    action_log = f"Mượn {borrow_time:.2f}s từ khoảng lặng"
+
+                # Case C: Audio quá dài so với cả Khoảng trống -> PHẢI TUA (SPEED UP)
                 else:
-                    # Trường hợp 3: Quá dài (> 35%) -> Chỉ tua max 1.35x để giữ chất giọng
-                    # Phần thừa còn lại chấp nhận bị Tràn/Trễ
-                    final_rate = 1.35
-                    process_note = f"🚀 MAX {final_rate:.2f}x"
+                    if available_space > 0.1: # Nếu còn chút không gian nào đó
+                        calc_rate = audio_duration / available_space
+                        # Chỉ cho phép tua tối đa 1.35x để đỡ méo tiếng
+                        if calc_rate <= 1.35:
+                            final_rate = calc_rate
+                            status_icon = "⚡ SPEED"
+                            action_log = f"Tua nhanh {final_rate:.2f}x để vừa Gap"
+                        else:
+                            final_rate = 1.35
+                            status_icon = "🐢 LAG"
+                            over_time = (audio_duration / 1.35) - available_space
+                            action_log = f"Max tua 1.35x (Vẫn trễ {over_time:.2f}s)"
+                    else:
+                        # Trường hợp hiếm: Không còn chỗ trống (câu trước lấn hết)
+                        final_rate = 1.4
+                        status_icon = "❌ CRIT"
+                        action_log = "Không còn Gap, ép tua 1.4x"
 
-                # Thực hiện Time Stretch nếu cần
-                if final_rate > 1.01: # Sai số nhỏ thì bỏ qua
-                    seg = librosa.effects.time_stretch(seg, rate=final_rate)
-
-                # --- TÍNH TOÁN VỊ TRÍ (Sau khi đã co giãn) ---
-                original_start_sample = int((sub.start.ordinal/1000) * SAMPLE_RATE)
-                start_sample = max(original_start_sample, last_end_sample)
-
-                # Tính lại thông số để Log
-                new_dur = len(seg) / SAMPLE_RATE
-                shift_seconds = (start_sample - original_start_sample) / SAMPLE_RATE
-
-                # Status Log
-                if shift_seconds > 0.1:
-                    status = f"⏩ TRỄ {shift_seconds:.2f}s"
-                elif new_dur > dur_slot + 0.1: # Cho phép dư xíu
-                    status = f"⚠️ DƯ {new_dur - dur_slot:.2f}s"
+                # 6. Xử lý Audio
+                if final_rate > 1.01:
+                    y_final = librosa.effects.time_stretch(y_trimmed, rate=final_rate)
                 else:
-                    status = "✅ OK"
+                    y_final = y_trimmed
 
-                # Ghép note xử lý vào status
-                full_status = f"{status} | {process_note}" if process_note else status
-
-                display_text = (clean_txt[:50] + '...') if len(clean_txt) > 50 else clean_txt
-
-                print(f"   [{i+1:03d}] {voice_label} | Slot: {dur_slot:.2f}s | Audio: {new_dur:.2f}s | {full_status} | 📖 {display_text}")
-
-                # 4. Ghép vào Timeline
-                end_sample = start_sample + len(seg)
+                # 7. Ghép vào Timeline
+                current_len = len(y_final)
+                end_sample = actual_start_sample + current_len
 
                 if end_sample > len(final_audio):
                     padding = np.zeros(end_sample - len(final_audio) + SAMPLE_RATE, dtype=np.float32)
                     final_audio = np.concatenate((final_audio, padding))
 
-                final_audio[start_sample:end_sample] += seg
+                final_audio[actual_start_sample:end_sample] += y_final
+                last_end_sample = end_sample
 
-                # Cập nhật mốc kết thúc (+0.05s nghỉ ít hơn để tiết kiệm chỗ)
-                last_end_sample = end_sample + int(0.05 * SAMPLE_RATE)
+                # 8. PRINT LOG CHI TIẾT
+                display_text = (clean_txt[:50] + "...") if len(clean_txt) > 50 else clean_txt
+
+                print(f"   [{i+1:03d}] {voice_icon} [{sub.start} -> {sub.end}]")
+                print(f"         📝 Text : {display_text}")
+                print(f"         ⏱️  Time : Slot Gốc: {slot_duration:.2f}s | Audio Gốc: {audio_duration:.2f}s | Gap Dư: {available_space:.2f}s")
+                print(f"         ⚙️  Xử lý: {status_icon} Rate {final_rate:.2f}x | {action_log}")
+                print("   " + "-"*60)
 
             except Exception as e:
-                print(f"❌ Lỗi câu {i}: {e}")
+                print(f"❌ [LỖI CÂU {i+1}] {e}")
             finally:
-                if os.path.exists(tmp): os.remove(tmp)
+                if os.path.exists(tmp_file): os.remove(tmp_file)
 
-        print("-" * 60)
+        # Cắt file đúng độ dài
+        final_valid_len = max(last_end_sample, int(subs[-1].end.ordinal/1000 * SAMPLE_RATE))
+        final_audio = final_audio[:final_valid_len + int(0.5*SAMPLE_RATE)] # Thêm 0.5s đuôi
+
         out_name = f"{path.replace('.srt', '')}_audio_{get_timestamp_str()}.wav"
         sf.write(out_name, final_audio, SAMPLE_RATE)
 
+        print("="*80)
         Logger.success(f"TTS Hoàn tất: {out_name}")
         return {"status": "success", "output_file": out_name}
 
     except Exception as e:
         Logger.error("TTS Error", e)
+        traceback.print_exc()
         raise HTTPException(500, str(e))
 
 @app.post("/api/v1/dubbing/mix-video")
