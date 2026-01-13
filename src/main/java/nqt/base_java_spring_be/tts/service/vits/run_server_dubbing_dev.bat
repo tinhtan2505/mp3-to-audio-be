@@ -54,6 +54,6 @@ echo --- KHOI DONG SERVER VITS ---
 echo Server se chay tai: http://localhost:8000
 echo Nhan Ctrl+C de dung server.
 echo.
-python dubbing.py
+python dubbing_dev.py
 
 pause

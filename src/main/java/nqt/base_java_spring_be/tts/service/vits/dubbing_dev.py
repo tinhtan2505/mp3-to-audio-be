@@ -105,7 +105,7 @@ def free_port_windows(port):
     """
     print(f"\n🧹 [AUTO-KILL] Đang kiểm tra cổng {port}...")
     try:
-        # Tìm PID đang chiếm port: netstat -ano | findstr :8008
+        # Tìm PID đang chiếm port: netstat -ano | findstr :8000
         result = subprocess.run(f"netstat -ano | findstr :{port}", shell=True, capture_output=True, text=True)
         output = result.stdout.strip()
 
@@ -750,7 +750,7 @@ def api_mix(req: MixRequest):
         raise HTTPException(500, str(e))
 
 if __name__ == "__main__":
-    # 🔥 Bước 0: Tự động tắt process cũ chiếm port 8008
+    # 🔥 Bước 0: Tự động tắt process cũ chiếm port 8000
     free_port_windows(PORT)
 
     print(f"🚀 STARTING SERVER ON PORT {PORT}...")
