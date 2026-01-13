@@ -45,7 +45,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # 1. CẤU HÌNH HỆ THỐNG (CONFIG)
 # ============================================
 HF_TOKEN = ""
-PORT = 8008  # 🔥 Cổng cố định
+PORT = 8000  # 🔥 Cổng cố định
 
 # Audio Config
 SAMPLE_RATE = 24000

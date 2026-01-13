@@ -7,4 +7,6 @@ import lombok.Data;
 public class DubbingFileRequest {
     @NotBlank(message = "Đường dẫn file không được để trống")
     private String inputPath;
+
+    private Boolean enableDiarization;
 }

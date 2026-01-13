@@ -36,6 +36,7 @@ public class DubbingServiceImpl implements DubbingService {
     @Override
     public DubbingResult dubbingFromWhisper(DubbingFileRequest req) {
         String inputPath = req.getInputPath();
+        boolean enableDiarization = req.getEnableDiarization() != null ? req.getEnableDiarization() : false;
 
         // 1. Validate đường dẫn
         File f = new File(inputPath);
@@ -45,7 +46,7 @@ public class DubbingServiceImpl implements DubbingService {
 
         try {
             // 2. Gọi Python Service (Nhận về JSON Map thay vì byte[])
-            Map<String, Object> pythonResponse = callPythonDubbingService(inputPath);
+            Map<String, Object> pythonResponse = callPythonDubbingService(inputPath, enableDiarization);
 
             // 3. Kiểm tra trạng thái từ Python trả về
             String status = (String) pythonResponse.get("status");
@@ -69,7 +70,7 @@ public class DubbingServiceImpl implements DubbingService {
     }
 
     // --- HELPER GỌI PYTHON ---
-    private Map<String, Object> callPythonDubbingService(String inputPath) {
+    private Map<String, Object> callPythonDubbingService(String inputPath, boolean enableDiarization) {
         try {
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
@@ -77,6 +78,7 @@ public class DubbingServiceImpl implements DubbingService {
             // Tạo body JSON: {"input_path": "D:/..."}
             Map<String, Object> body = new HashMap<>();
             body.put("input_path", inputPath);
+            body.put("enable_diarization", enableDiarization);
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 
