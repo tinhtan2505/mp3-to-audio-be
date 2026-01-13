@@ -167,7 +167,7 @@ def load_ai_models():
     print("\n⏳ Loading Whisper...")
     start = time.time()
     try:
-        AI_MODELS["whisper"] = whisper.load_model("medium", device=AI_MODELS["device"])
+        AI_MODELS["whisper"] = whisper.load_model("large", device=AI_MODELS["device"])
         Logger.success(f"Whisper loaded on {AI_MODELS['device'].upper()}", time.time() - start)
     except Exception as e:
         Logger.error("Lỗi Whisper", e)
