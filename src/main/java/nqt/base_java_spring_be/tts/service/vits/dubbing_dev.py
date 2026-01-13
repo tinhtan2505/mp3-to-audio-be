@@ -23,14 +23,6 @@ from whisper.utils import get_writer
 import edge_tts
 from pathlib import Path
 
-# 🔥 FIX LỖI IMPORT CŨ: Dùng alias để tránh xung đột
-from transformers import pipeline as hf_pipeline
-
-# --- PYANNOTE SETUP ---
-import huggingface_hub
-from pyannote.audio import Pipeline
-from pyannote.core import Segment
-
 # --- FASTAPI ---
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -44,8 +36,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # ============================================
 # 1. CẤU HÌNH HỆ THỐNG (CONFIG)
 # ============================================
-HF_TOKEN = ""
-PORT = 8000  # 🔥 Cổng cố định
+PORT = 8008  # 🔥 Cổng cố định
 
 # Audio Config
 SAMPLE_RATE = 24000
@@ -61,8 +52,6 @@ VOICE_MALE = "vi-VN-NamMinhNeural"
 
 AI_MODELS = {
     "whisper": None,
-    "pyannote": None,
-    "gender": None,
     "device": "cpu"
 }
 
@@ -105,7 +94,7 @@ def free_port_windows(port):
     """
     print(f"\n🧹 [AUTO-KILL] Đang kiểm tra cổng {port}...")
     try:
-        # Tìm PID đang chiếm port: netstat -ano | findstr :8000
+        # Tìm PID đang chiếm port: netstat -ano | findstr :8008
         result = subprocess.run(f"netstat -ano | findstr :{port}", shell=True, capture_output=True, text=True)
         output = result.stdout.strip()
 
@@ -174,75 +163,14 @@ def check_system_requirements():
 
 def load_ai_models():
     Logger.section("BƯỚC 2: LOAD AI MODELS")
-    device = torch.device(AI_MODELS["device"])
-    device_id = 0 if AI_MODELS["device"] == "cuda" else -1
-
     # 1. Whisper
-    print("\n⏳ [1/3] Loading Whisper...")
+    print("\n⏳ Loading Whisper...")
     start = time.time()
     try:
         AI_MODELS["whisper"] = whisper.load_model("medium", device=AI_MODELS["device"])
         Logger.success(f"Whisper loaded on {AI_MODELS['device'].upper()}", time.time() - start)
     except Exception as e:
         Logger.error("Lỗi Whisper", e)
-
-    # 2. Pyannote
-    print("\n⏳ [2/3] Loading Pyannote...")
-    start = time.time()
-    try:
-        if not HF_TOKEN:
-            raise ValueError("Thiếu HF_TOKEN")
-
-        huggingface_hub.login(token=HF_TOKEN)
-
-        # 🔥 FIX: Load với use_auth_token và đảm bảo device là torch.device
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
-            use_auth_token=HF_TOKEN
-        )
-
-        # 🔥 FIX: Force tất cả sub-models lên GPU
-        pipeline.to(device)
-
-        # 🔥 FIX: Verify device (Pyannote dùng Inference wrapper)
-        print(f"   📍 Pyannote moved to: {device}")
-
-        AI_MODELS["pyannote"] = pipeline
-        Logger.success(f"Pyannote loaded on {device}", time.time() - start)
-
-    except Exception as e:
-        Logger.error("Lỗi Pyannote", e)
-        Logger.warning("Hệ thống sẽ chạy không có Speaker Diarization")
-
-    # 3. Gender Classifier
-    print("\n⏳ [3/3] Loading Gender Model...")
-    start = time.time()
-    try:
-        # 🔥 FIX: Dùng GPU nếu có, CPU nếu không
-        classifier = hf_pipeline(
-            "audio-classification",
-            model="alefiury/wav2vec2-large-xlsr-53-gender-recognition-librispeech",
-            device=device_id  # 0 = GPU, -1 = CPU
-        )
-        AI_MODELS["gender"] = classifier
-
-        device_name = "GPU (CUDA)" if device_id == 0 else "CPU"
-        Logger.success(f"Gender Model loaded on {device_name}", time.time() - start)
-
-    except Exception as e:
-        Logger.error("Lỗi Gender Model", e)
-        Logger.warning("Hệ thống sẽ mặc định giọng Nữ cho tất cả speaker")
-
-    # 🔥 THÊM: In thông tin cuối cùng
-    print("\n" + "="*60)
-    print("📊 TỔNG KẾT THIẾT BỊ:")
-    print(f"   • PyTorch device: {device}")
-    print(f"   • Whisper: {AI_MODELS['device'].upper()}")
-    print(f"   • Pyannote: {'GPU' if device_id == 0 else 'CPU'}")
-    print(f"   • Gender: {'GPU' if device_id == 0 else 'CPU'}")
-    if torch.cuda.is_available():
-        print(f"   • VRAM Available: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    print("="*60)
 
 # ============================================
 # 4. LIFESPAN
@@ -269,40 +197,6 @@ async def generate_tts(text, voice, output_file, rate="+0%"):
     # rate string format: "+0%", "+10%", "-5%"
     communicate = edge_tts.Communicate(text, voice, rate=rate)
     await communicate.save(output_file)
-
-def get_gender_from_ai(audio_path, start, dur):
-    if AI_MODELS["gender"] is None: return "NU"
-    try:
-        y, sr = librosa.load(audio_path, sr=16000, offset=start, duration=min(dur, 3.0))
-        tmp = f"temp_{uuid.uuid4().hex}.wav"
-        sf.write(tmp, y, 16000)
-        res = AI_MODELS["gender"](tmp)
-        if os.path.exists(tmp): os.remove(tmp)
-        return "NU" if "female" in res[0]['label'].lower() else "NAM"
-    except: return "NU"
-
-def create_speaker_mapping(diarization, path):
-    mapping = {}
-    m, f = 0, 0
-    print(f"   🔍 Phân tích giới tính {len(diarization.labels())} người...")
-    for label in diarization.labels():
-        seg = max(diarization.label_timeline(label), key=lambda s: s.duration)
-        gender = get_gender_from_ai(path, seg.start, seg.duration)
-        if gender == "NAM": m+=1; new_l = f"NAM_{m:02d}"
-        else: f+=1; new_l = f"NU_{f:02d}"
-        mapping[label] = new_l
-        print(f"      👉 {label} -> {new_l} ({gender})")
-    return mapping
-
-def align_whisper(whisper_res, diarization, mapping):
-    for seg in whisper_res["segments"]:
-        t = Segment(seg["start"], seg["end"])
-        spk = diarization.crop(t).argmax()
-        if spk:
-            l = mapping.get(spk, spk)
-            seg["text"] = f"[{l}] {seg['text'].strip()}"
-    return whisper_res
-
 # --- DTO ---
 class WhisperRequest(BaseModel):
     input_path: str
@@ -346,30 +240,6 @@ def api_whisper(req: WhisperRequest):
         start_w = time.time()
         w_res = AI_MODELS["whisper"].transcribe(path, language="zh", fp16=False)
         Logger.success("Whisper xong", time.time() - start_w)
-
-        # --- BƯỚC 2: SPEAKER DIARIZATION (PYANNOTE) ---
-        # 🔥 ĐIỀU KIỆN MỚI: Chỉ chạy nếu User yêu cầu VÀ Model đã load thành công
-        if req.enable_diarization:
-            if AI_MODELS["pyannote"]:
-                print("   ⏳ [2/2] Running Diarization (Pyannote)...")
-                try:
-                    start_d = time.time()
-                    d_res = AI_MODELS["pyannote"](path)
-
-                    # Mapping Speaker -> Gender (Nam/Nu)
-                    mapping = create_speaker_mapping(d_res, path)
-
-                    # Gán lại Speaker vào Text của Whisper
-                    w_res = align_whisper(w_res, d_res, mapping)
-                    Logger.success("Diarization xong", time.time() - start_d)
-
-                except Exception as e:
-                    Logger.error("Lỗi trong quá trình Diarization", e)
-                    print("   ⚠️ Sẽ xuất file SRT mà không có phân loại người nói.")
-            else:
-                print("   ⚠️ [SKIP] User yêu cầu Diarization nhưng Model Pyannote chưa load (Check HF_TOKEN hoặc GPU).")
-        else:
-            print("   ⏩ [SKIP] User chọn tắt Diarization -> Bỏ qua bước phân loại người nói.")
 
         # --- BƯỚC 3: XUẤT FILE ---
         out_dir = os.path.dirname(path)
@@ -750,7 +620,7 @@ def api_mix(req: MixRequest):
         raise HTTPException(500, str(e))
 
 if __name__ == "__main__":
-    # 🔥 Bước 0: Tự động tắt process cũ chiếm port 8000
+    # 🔥 Bước 0: Tự động tắt process cũ chiếm port 8008
     free_port_windows(PORT)
 
     print(f"🚀 STARTING SERVER ON PORT {PORT}...")

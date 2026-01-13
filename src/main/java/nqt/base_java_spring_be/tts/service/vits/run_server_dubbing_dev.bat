@@ -51,7 +51,7 @@ IF ERRORLEVEL 1 (
 
 echo.
 echo --- KHOI DONG SERVER VITS ---
-echo Server se chay tai: http://localhost:8000
+echo Server se chay tai: http://localhost:8008
 echo Nhan Ctrl+C de dung server.
 echo.
 python dubbing_dev.py

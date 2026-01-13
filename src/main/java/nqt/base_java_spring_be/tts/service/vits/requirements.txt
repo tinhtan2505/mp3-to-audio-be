@@ -1,20 +1,15 @@
---find-links https://download.pytorch.org/whl/torch_stable.html
-torch==2.2.0+cu121
-torchaudio==2.2.0+cu121
-torchvision==0.17.0+cu121
-pyannote.audio==3.1.1
+--extra-index-url https://download.pytorch.org/whl/cu121
 
-openai-whisper==20231117
-edge-tts==7.2.7
-pysrt==1.1.2
-librosa==0.10.1
-soundfile==0.12.1
-numpy==1.26.4
-
-fastapi==0.109.0
-uvicorn==0.27.0
-pydantic==2.5.0
-
+torch
+torchaudio
+openai-whisper
+edge-tts
+pysrt
+librosa
+soundfile
+numpy
+fastapi
+uvicorn
+pydantic
 requests
 tqdm
-pathlib
