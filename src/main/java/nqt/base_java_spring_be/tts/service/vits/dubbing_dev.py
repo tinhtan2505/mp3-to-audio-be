@@ -111,15 +111,23 @@ def write_srt_faster(segments, file_path):
             text = segment.text.strip()
             f.write(f"{i}\n{start_str} --> {end_str}\n{text}\n\n")
 
-def normalize_segment_time(segment):
+def normalize_segment_time(segment, min_duration=0.15):
     """
-    Ép timestamp của segment theo word timestamp
-    → Fix triệt để lỗi lệch time (9s ↔ 19s)
+    Normalize timestamp bằng word timestamp + clamp an toàn
     """
     if hasattr(segment, "words") and segment.words:
-        segment.start = segment.words[0].start
-        segment.end = segment.words[-1].end
+        start = segment.words[0].start
+        end = segment.words[-1].end
+
+        # 🔒 Clamp chống đoạn quá ngắn (edge case)
+        if end - start < min_duration:
+            end = start + min_duration
+
+        segment.start = round(start, 3)
+        segment.end = round(end, 3)
+
     return segment
+
 
 def free_port_windows(port):
     """
@@ -313,16 +321,23 @@ def api_whisper(req: WhisperRequest):
             segments, info = AI_MODELS["whisper"].transcribe(
                 path,
                 language="zh",
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_silence_duration_ms=500,   # Khoảng lặng >0.5s sẽ bị cắt (giúp tách câu tốt hơn)
+                    speech_pad_ms=400              # Giữ lại một chút âm thanh quanh tiếng nói để không bị mất chữ đầu/cuối
+                ),
+                condition_on_previous_text=False,
 
-                # ===============================
-                # 🔥 FIX LỆCH TIMESTAMP
-                # ===============================
-                vad_filter=False,                  # ❌ TẮT VAD (NGUYÊN NHÂN CHÍNH)
-                condition_on_previous_text=False,  # ❌ KHÔNG GỘP NGỮ CẢNH
+                beam_size=1,            # ⚡ Nhanh nhất (Greedy)
+                best_of=1,              # Đi kèm với beam_size=1
+                temperature=0.0,        # Greedy cần nhiệt độ 0
 
-                beam_size=1,       # 🔥 Greedy → timestamp trung thực
-                best_of=1,
-                temperature=0.0,
+                # beam_size=5,
+                # best_of=5,
+                # temperature=[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+
+                repetition_penalty=1.2,
+                no_speech_threshold=0.6,
 
                 word_timestamps=True,  # ✅ BẮT BUỘC
 
@@ -331,9 +346,8 @@ def api_whisper(req: WhisperRequest):
                 # ===============================
                 compression_ratio_threshold=2.0,
                 log_prob_threshold=-1.0,
-                no_speech_threshold=0.6,
 
-                initial_prompt=None    # ❌ BỎ PROMPT (TRÁNH MERGE CÂU)
+                initial_prompt=None
             )
 
             # =====================================================
@@ -352,10 +366,6 @@ def api_whisper(req: WhisperRequest):
             print(f"   • Language: {info.language} ({info.language_probability:.2%})")
             print(f"   • Tổng câu: {len(segments_list)}")
             print(f"   • Thời gian xử lý: {elapsed:.2f}s")
-
-            print(f"\n🔍 PREVIEW 3 CÂU ĐẦU:")
-            for i, seg in enumerate(segments_list[:3]):
-                print(f"   [{i+1}] {seg.start:.2f}s -> {seg.end:.2f}s: {seg.text.strip()}")
 
             # =====================================================
             # 💾 SAVE SRT
