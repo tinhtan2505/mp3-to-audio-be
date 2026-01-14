@@ -20,6 +20,7 @@ import torch
 import torchaudio
 import whisper
 from whisper.utils import get_writer
+from faster_whisper import WhisperModel
 import edge_tts
 from pathlib import Path
 
@@ -37,6 +38,11 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # 1. CẤU HÌNH HỆ THỐNG (CONFIG)
 # ============================================
 PORT = 8008  # 🔥 Cổng cố định
+
+# 🔥🔥🔥 CẤU HÌNH QUAN TRỌNG: CHỌN ENGINE WHISPER 🔥🔥🔥
+# Options: "faster" (Khuyên dùng cho CPU) | "openai" (Gốc)
+WHISPER_BACKEND = "faster"
+WHISPER_MODEL_SIZE = "large-v3"
 
 # Audio Config
 SAMPLE_RATE = 24000
@@ -87,6 +93,23 @@ class Logger:
 
 def get_timestamp_str():
     return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+def format_timestamp(seconds: float):
+    whole_seconds = int(seconds)
+    milliseconds = int((seconds - whole_seconds) * 1000)
+    hours = whole_seconds // 3600
+    minutes = (whole_seconds % 3600) // 60
+    seconds = whole_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
+
+def write_srt_faster(segments, file_path):
+    """Hàm ghi file SRT dành riêng cho Faster-Whisper"""
+    with open(file_path, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(segments, start=1):
+            start_str = format_timestamp(segment.start)
+            end_str = format_timestamp(segment.end)
+            text = segment.text.strip()
+            f.write(f"{i}\n{start_str} --> {end_str}\n{text}\n\n")
 
 def free_port_windows(port):
     """
@@ -162,15 +185,50 @@ def check_system_requirements():
         print("      3. CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%")
 
 def load_ai_models():
-    Logger.section("BƯỚC 2: LOAD AI MODELS")
-    # 1. Whisper
-    print("\n⏳ Loading Whisper...")
+    Logger.section(f"BƯỚC 2: LOAD AI MODELS (MODE: {WHISPER_BACKEND.upper()})")
+
+    print(f"\n⏳ Loading Whisper Model: {WHISPER_MODEL_SIZE}...")
     start = time.time()
+
     try:
-        AI_MODELS["whisper"] = whisper.load_model("large", device=AI_MODELS["device"])
-        Logger.success(f"Whisper loaded on {AI_MODELS['device'].upper()}", time.time() - start)
+        if WHISPER_BACKEND == "faster":
+            # 🔥 CẤU HÌNH TỐI ƯU CHO FASTER-WHISPER
+
+            # Xác định số thread tối ưu
+            cpu_count = os.cpu_count() or 4
+            optimal_threads = max(cpu_count - 2, 4)  # Để lại 2 core cho hệ thống
+
+            # Kiểm tra GPU
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+            if device == "cuda":
+                # Nếu có GPU → dùng float16
+                compute_type = "float16"
+                print(f"   🎮 GPU Mode: {torch.cuda.get_device_name(0)}")
+            else:
+                # Nếu CPU → dùng int8
+                compute_type = "int8"
+                print(f"   💻 CPU Mode: {optimal_threads} threads")
+
+            AI_MODELS["whisper"] = WhisperModel(
+                model_size_or_path=WHISPER_MODEL_SIZE,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=optimal_threads,
+                num_workers=2  # Song song hóa preprocessing
+            )
+            Logger.success(f"Faster-Whisper Loaded ({device.upper()}, {compute_type})", time.time() - start)
+
+        elif WHISPER_BACKEND == "openai":
+            # OpenAI Whisper
+            AI_MODELS["whisper"] = whisper.load_model(
+                WHISPER_MODEL_SIZE,
+                device=AI_MODELS["device"]
+            )
+            Logger.success(f"OpenAI-Whisper Loaded ({AI_MODELS['device'].upper()})", time.time() - start)
+
     except Exception as e:
-        Logger.error("Lỗi Whisper", e)
+        Logger.error("Lỗi Load Whisper", e)
 
 # ============================================
 # 4. LIFESPAN
@@ -223,44 +281,147 @@ class MixRequest(BaseModel):
 @app.post("/api/v1/dubbing/whisper")
 def api_whisper(req: WhisperRequest):
     if not AI_MODELS["whisper"]:
-        raise HTTPException(500, "Whisper chưa load (Model chưa sẵn sàng)")
+        raise HTTPException(500, "Whisper chưa load")
 
     try:
         path = os.path.abspath(req.input_path)
         if not os.path.exists(path):
             raise FileNotFoundError(f"File không tồn tại: {path}")
 
-        # --- BƯỚC 1: TRANSCRIPTION (WHISPER) ---
         print("\n" + "="*60)
-        print(f"🎤 WHISPER PROCESSING")
+        print(f"🎤 WHISPER PROCESSING ({WHISPER_BACKEND.upper()})")
         print(f"   • Input: {os.path.basename(path)}")
-        print(f"   • Diarization Request: {'BẬT' if req.enable_diarization else 'TẮT'}")
 
-        print("   ⏳ [1/2] Transcribing...")
         start_w = time.time()
-        w_res = AI_MODELS["whisper"].transcribe(path, language="zh", fp16=False)
-        Logger.success("Whisper xong", time.time() - start_w)
 
-        # --- BƯỚC 3: XUẤT FILE ---
-        out_dir = os.path.dirname(path)
-        base = os.path.splitext(os.path.basename(path))[0].split('_')[0]
-        out_name = f"{base}_cn_{get_timestamp_str()}"
+        # --- LOGIC XỬ LÝ DỰA TRÊN CONFIG ---
 
-        get_writer("srt", out_dir)(w_res, out_name)
-        full = os.path.join(out_dir, out_name + ".srt")
+        # 1. TRƯỜNG HỢP DÙNG FASTER-WHISPER
+        if WHISPER_BACKEND == "faster":
+            print("   ⏳ Transcribing (Faster-Whisper)...")
 
-        print("="*60)
-        Logger.success(f"SRT saved: {full}")
+            # 🔥 CẤU HÌNH TỐI ƯU ĐỘ CHÍNH XÁC
+            segments, info = AI_MODELS["whisper"].transcribe(
+                path,
+                language="zh",
+
+                # === THAM SỐ CHÍNH XÁC ===
+                beam_size=5,  # ⬆️ Tăng lên 5 cho độ chính xác cao (đánh đổi tốc độ)
+                best_of=5,    # 🔥 MỚI: Chọn best trong 5 hypothesis
+                patience=2.0, # 🔥 MỚI: Chờ lâu hơn để tìm kết quả tốt nhất
+
+                # === VAD (Voice Activity Detection) ===
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_silence_duration_ms=300,  # ⬇️ Giảm xuống để phát hiện câu ngắn hơn
+                    threshold=0.4,  # ⬇️ Nhạy hơn để không bỏ sót
+                    min_speech_duration_ms=200,  # 🔥 MỚI: Câu tối thiểu 200ms
+                    speech_pad_ms=200  # 🔥 MỚI: Padding 200ms trước/sau mỗi câu
+                ),
+
+                # === TIMESTAMP ACCURACY ===
+                word_timestamps=True,  # 🔥 QUAN TRỌNG: Bật timestamp từng từ
+                prepend_punctuations='"\'¿([{-',
+                append_punctuations='"\'.。,!?:)]}、',
+
+            # === QUALITY vs SPEED ===
+            condition_on_previous_text=True,  # ⬆️ BẬT lại để context tốt hơn
+            temperature=0.0,  # Greedy = chính xác nhất
+            compression_ratio_threshold=2.4,
+            log_prob_threshold=-1.0,
+            no_speech_threshold=0.5,  # ⬇️ Giảm để không bỏ sót câu nhẹ
+
+            # === HALLUCINATION PREVENTION ===
+            repetition_penalty=1.2,  # 🔥 MỚI: Tránh lặp lại
+            no_repeat_ngram_size=3,  # 🔥 MỚI: Không lặp cụm 3 từ
+
+            # === INITIAL PROMPT (CONTEXT) ===
+            initial_prompt="这是中文语音转录。请准确识别每个字词和标点符号。"  # 🔥 Gợi ý context
+            )
+
+            segments_list = list(segments)
+
+            # 🔥 KIỂM TRA VÀ IN THÔNG TIN DEBUG
+            print(f"\n📊 THỐNG KÊ:")
+            print(f"   • Phát hiện: {info.language} (confidence: {info.language_probability:.2%})")
+            print(f"   • Tổng câu: {len(segments_list)}")
+            print(f"   • Thời gian: {time.time() - start_w:.2f}s")
+
+            # In ra 3 câu đầu để kiểm tra
+            print(f"\n🔍 PREVIEW 3 CÂU ĐẦU:")
+            for i, seg in enumerate(segments_list[:3]):
+                print(f"   [{i+1}] {seg.start:.2f}s -> {seg.end:.2f}s: {seg.text.strip()}")
+
+            Logger.success(f"Dịch xong {len(segments_list)} câu", time.time() - start_w)
+
+            # Xuất file
+            out_dir = os.path.dirname(path)
+            base = os.path.splitext(os.path.basename(path))[0].split('_')[0]
+            out_name = f"{base}_cn_{get_timestamp_str()}.srt"
+            full = os.path.join(out_dir, out_name)
+
+            write_srt_faster(segments_list, full)
+
+            # 2. TRƯỜNG HỢP DÙNG OPENAI-WHISPER GỐC
+        else:
+            print("   ⏳ Transcribing (OpenAI-Whisper)...")
+
+            # 🔥 CẤU HÌNH TỐI ƯU ĐỘ CHÍNH XÁC
+            w_res = AI_MODELS["whisper"].transcribe(
+                path,
+                language="zh",
+
+                # === ACCURACY SETTINGS ===
+                fp16=torch.cuda.is_available(),  # Tự động detect GPU
+                beam_size=5,  # ⬆️ Tăng lên 5
+                best_of=5,    # 🔥 MỚI
+                patience=2.0, # 🔥 MỚI
+
+                # === TIMESTAMP ===
+                word_timestamps=True,  # 🔥 QUAN TRỌNG
+
+                # === QUALITY ===
+                condition_on_previous_text=True,
+                temperature=0.0,
+                compression_ratio_threshold=2.4,
+                logprob_threshold=-1.0,
+                no_speech_threshold=0.5,
+
+                # === CONTEXT ===
+                initial_prompt="这是中文语音转录。请准确识别每个字词和标点符号。"
+            )
+
+            # 🔥 KIỂM TRA DEBUG
+            print(f"\n📊 THỐNG KÊ:")
+            print(f"   • Phát hiện: {w_res.get('language', 'N/A')}")
+            print(f"   • Tổng câu: {len(w_res.get('segments', []))}")
+            print(f"   • Thời gian: {time.time() - start_w:.2f}s")
+
+            print(f"\n🔍 PREVIEW 3 CÂU ĐẦU:")
+            for i, seg in enumerate(w_res.get('segments', [])[:3]):
+                print(f"   [{i+1}] {seg['start']:.2f}s -> {seg['end']:.2f}s: {seg['text'].strip()}")
+
+            Logger.success("Dịch xong", time.time() - start_w)
+
+            # Xuất file
+            out_dir = os.path.dirname(path)
+            base = os.path.splitext(os.path.basename(path))[0].split('_')[0]
+            out_name = f"{base}_cn_{get_timestamp_str()}"
+
+            get_writer("srt", out_dir)(w_res, out_name)
+            full = os.path.join(out_dir, out_name + ".srt")
+
+            print("="*60)
+            Logger.success(f"SRT saved: {full}")
 
         return {
             "status": "success",
             "output_file": full,
-            "diarization_performed": (req.enable_diarization and AI_MODELS["pyannote"] is not None)
+            "engine": WHISPER_BACKEND
         }
 
     except Exception as e:
         Logger.error("Whisper Error", e)
-        # traceback.print_exc() # Bỏ comment nếu muốn debug sâu
         raise HTTPException(500, str(e))
 
 @app.post("/api/v1/dubbing/tts-gen")

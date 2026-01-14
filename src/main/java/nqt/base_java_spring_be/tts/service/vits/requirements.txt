@@ -3,6 +3,7 @@
 torch
 torchaudio
 openai-whisper
+faster_whisper
 edge-tts
 pysrt
 librosa
