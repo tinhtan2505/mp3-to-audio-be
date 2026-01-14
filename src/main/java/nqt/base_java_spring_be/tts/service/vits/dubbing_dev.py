@@ -111,6 +111,16 @@ def write_srt_faster(segments, file_path):
             text = segment.text.strip()
             f.write(f"{i}\n{start_str} --> {end_str}\n{text}\n\n")
 
+def normalize_segment_time(segment):
+    """
+    Ép timestamp của segment theo word timestamp
+    → Fix triệt để lỗi lệch time (9s ↔ 19s)
+    """
+    if hasattr(segment, "words") and segment.words:
+        segment.start = segment.words[0].start
+        segment.end = segment.words[-1].end
+    return segment
+
 def free_port_windows(port):
     """
     🔥 HÀM MỚI: Tự động tìm và tắt tiến trình đang chiếm port
@@ -288,73 +298,68 @@ def api_whisper(req: WhisperRequest):
         if not os.path.exists(path):
             raise FileNotFoundError(f"File không tồn tại: {path}")
 
-        print("\n" + "="*60)
-        print(f"🎤 WHISPER PROCESSING ({WHISPER_BACKEND.upper()})")
+        print("\n" + "=" * 60)
+        print(f"🎤 WHISPER PROCESSING (TIMESTAMP-ACCURATE MODE)")
         print(f"   • Input: {os.path.basename(path)}")
 
         start_w = time.time()
 
-        # --- LOGIC XỬ LÝ DỰA TRÊN CONFIG ---
-
-        # 1. TRƯỜNG HỢP DÙNG FASTER-WHISPER
+        # =====================================================
+        # 🔥 FASTER-WHISPER – TIMESTAMP FIRST CONFIG
+        # =====================================================
         if WHISPER_BACKEND == "faster":
-            print("   ⏳ Transcribing (Faster-Whisper)...")
+            print("   ⏳ Transcribing (Faster-Whisper | Accurate Time)...")
 
-            # 🔥 CẤU HÌNH TỐI ƯU ĐỘ CHÍNH XÁC
             segments, info = AI_MODELS["whisper"].transcribe(
                 path,
                 language="zh",
 
-                # === THAM SỐ CHÍNH XÁC ===
-                beam_size=5,  # ⬆️ Tăng lên 5 cho độ chính xác cao (đánh đổi tốc độ)
-                best_of=5,    # 🔥 MỚI: Chọn best trong 5 hypothesis
-                patience=2.0, # 🔥 MỚI: Chờ lâu hơn để tìm kết quả tốt nhất
+                # ===============================
+                # 🔥 FIX LỆCH TIMESTAMP
+                # ===============================
+                vad_filter=False,                  # ❌ TẮT VAD (NGUYÊN NHÂN CHÍNH)
+                condition_on_previous_text=False,  # ❌ KHÔNG GỘP NGỮ CẢNH
 
-                # === VAD (Voice Activity Detection) ===
-                vad_filter=True,
-                vad_parameters=dict(
-                    min_silence_duration_ms=300,  # ⬇️ Giảm xuống để phát hiện câu ngắn hơn
-                    threshold=0.4,  # ⬇️ Nhạy hơn để không bỏ sót
-                    min_speech_duration_ms=200,  # 🔥 MỚI: Câu tối thiểu 200ms
-                    speech_pad_ms=200  # 🔥 MỚI: Padding 200ms trước/sau mỗi câu
-                ),
+                beam_size=1,       # 🔥 Greedy → timestamp trung thực
+                best_of=1,
+                temperature=0.0,
 
-                # === TIMESTAMP ACCURACY ===
-                word_timestamps=True,  # 🔥 QUAN TRỌNG: Bật timestamp từng từ
-                prepend_punctuations='"\'¿([{-',
-                append_punctuations='"\'.。,!?:)]}、',
+                word_timestamps=True,  # ✅ BẮT BUỘC
 
-            # === QUALITY vs SPEED ===
-            condition_on_previous_text=True,  # ⬆️ BẬT lại để context tốt hơn
-            temperature=0.0,  # Greedy = chính xác nhất
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.5,  # ⬇️ Giảm để không bỏ sót câu nhẹ
+                # ===============================
+                # 🛡️ HẠN CHẾ HALLUCINATION NHẸ
+                # ===============================
+                compression_ratio_threshold=2.0,
+                log_prob_threshold=-1.0,
+                no_speech_threshold=0.6,
 
-            # === HALLUCINATION PREVENTION ===
-            repetition_penalty=1.2,  # 🔥 MỚI: Tránh lặp lại
-            no_repeat_ngram_size=3,  # 🔥 MỚI: Không lặp cụm 3 từ
-
-            # === INITIAL PROMPT (CONTEXT) ===
-            initial_prompt="这是中文语音转录。请准确识别每个字词和标点符号。"  # 🔥 Gợi ý context
+                initial_prompt=None    # ❌ BỎ PROMPT (TRÁNH MERGE CÂU)
             )
 
-            segments_list = list(segments)
+            # =====================================================
+            # 🔥 FIX TIME BẰNG WORD TIMESTAMP
+            # =====================================================
+            segments_list = []
+            for seg in segments:
+                seg = normalize_segment_time(seg)  # 🔥 DÒNG QUAN TRỌNG NHẤT
+                segments_list.append(seg)
 
-            # 🔥 KIỂM TRA VÀ IN THÔNG TIN DEBUG
+            # =====================================================
+            # 📊 DEBUG INFO
+            # =====================================================
+            elapsed = time.time() - start_w
             print(f"\n📊 THỐNG KÊ:")
-            print(f"   • Phát hiện: {info.language} (confidence: {info.language_probability:.2%})")
+            print(f"   • Language: {info.language} ({info.language_probability:.2%})")
             print(f"   • Tổng câu: {len(segments_list)}")
-            print(f"   • Thời gian: {time.time() - start_w:.2f}s")
+            print(f"   • Thời gian xử lý: {elapsed:.2f}s")
 
-            # In ra 3 câu đầu để kiểm tra
             print(f"\n🔍 PREVIEW 3 CÂU ĐẦU:")
             for i, seg in enumerate(segments_list[:3]):
                 print(f"   [{i+1}] {seg.start:.2f}s -> {seg.end:.2f}s: {seg.text.strip()}")
 
-            Logger.success(f"Dịch xong {len(segments_list)} câu", time.time() - start_w)
-
-            # Xuất file
+            # =====================================================
+            # 💾 SAVE SRT
+            # =====================================================
             out_dir = os.path.dirname(path)
             base = os.path.splitext(os.path.basename(path))[0].split('_')[0]
             out_name = f"{base}_cn_{get_timestamp_str()}.srt"
@@ -362,67 +367,24 @@ def api_whisper(req: WhisperRequest):
 
             write_srt_faster(segments_list, full)
 
-            # 2. TRƯỜNG HỢP DÙNG OPENAI-WHISPER GỐC
+            Logger.success(f"Whisper xong ({len(segments_list)} câu)", elapsed)
+
+            return {
+                "status": "success",
+                "engine": "faster-whisper",
+                "output_file": full
+            }
+
+        # =====================================================
+        # (OPTIONAL) OPENAI WHISPER – KHÔNG KHUYẾN NGHỊ
+        # =====================================================
         else:
-            print("   ⏳ Transcribing (OpenAI-Whisper)...")
-
-            # 🔥 CẤU HÌNH TỐI ƯU ĐỘ CHÍNH XÁC
-            w_res = AI_MODELS["whisper"].transcribe(
-                path,
-                language="zh",
-
-                # === ACCURACY SETTINGS ===
-                fp16=torch.cuda.is_available(),  # Tự động detect GPU
-                beam_size=5,  # ⬆️ Tăng lên 5
-                best_of=5,    # 🔥 MỚI
-                patience=2.0, # 🔥 MỚI
-
-                # === TIMESTAMP ===
-                word_timestamps=True,  # 🔥 QUAN TRỌNG
-
-                # === QUALITY ===
-                condition_on_previous_text=True,
-                temperature=0.0,
-                compression_ratio_threshold=2.4,
-                logprob_threshold=-1.0,
-                no_speech_threshold=0.5,
-
-                # === CONTEXT ===
-                initial_prompt="这是中文语音转录。请准确识别每个字词和标点符号。"
-            )
-
-            # 🔥 KIỂM TRA DEBUG
-            print(f"\n📊 THỐNG KÊ:")
-            print(f"   • Phát hiện: {w_res.get('language', 'N/A')}")
-            print(f"   • Tổng câu: {len(w_res.get('segments', []))}")
-            print(f"   • Thời gian: {time.time() - start_w:.2f}s")
-
-            print(f"\n🔍 PREVIEW 3 CÂU ĐẦU:")
-            for i, seg in enumerate(w_res.get('segments', [])[:3]):
-                print(f"   [{i+1}] {seg['start']:.2f}s -> {seg['end']:.2f}s: {seg['text'].strip()}")
-
-            Logger.success("Dịch xong", time.time() - start_w)
-
-            # Xuất file
-            out_dir = os.path.dirname(path)
-            base = os.path.splitext(os.path.basename(path))[0].split('_')[0]
-            out_name = f"{base}_cn_{get_timestamp_str()}"
-
-            get_writer("srt", out_dir)(w_res, out_name)
-            full = os.path.join(out_dir, out_name + ".srt")
-
-            print("="*60)
-            Logger.success(f"SRT saved: {full}")
-
-        return {
-            "status": "success",
-            "output_file": full,
-            "engine": WHISPER_BACKEND
-        }
+            raise HTTPException(400, "Chế độ openai-whisper không hỗ trợ timestamp chuẩn cho lồng tiếng")
 
     except Exception as e:
         Logger.error("Whisper Error", e)
         raise HTTPException(500, str(e))
+
 
 @app.post("/api/v1/dubbing/tts-gen")
 async def api_tts(req: TtsRequest):
