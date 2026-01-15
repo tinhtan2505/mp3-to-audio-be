@@ -43,6 +43,7 @@ PORT = 8008  # 🔥 Cổng cố định
 # Options: "faster" (Khuyên dùng cho CPU) | "openai" (Gốc)
 WHISPER_BACKEND = "faster"
 WHISPER_MODEL_SIZE = "large-v3"
+MAX_SEGMENTS_PER_FILE = 500
 
 # Audio Config
 SAMPLE_RATE = 24000
@@ -102,10 +103,14 @@ def format_timestamp(seconds: float):
     seconds = whole_seconds % 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{milliseconds:03d}"
 
-def write_srt_faster(segments, file_path):
-    """Hàm ghi file SRT dành riêng cho Faster-Whisper"""
+def write_srt_faster(segments, file_path, start_index=1):
+    """
+    Hàm ghi file SRT dành riêng cho Faster-Whisper.
+    Hỗ trợ tham số start_index để nối số thứ tự giữa các file.
+    """
     with open(file_path, "w", encoding="utf-8") as f:
-        for i, segment in enumerate(segments, start=1):
+        # Sử dụng start=start_index thay vì cố định là 1
+        for i, segment in enumerate(segments, start=start_index):
             start_str = format_timestamp(segment.start)
             end_str = format_timestamp(segment.end)
             text = segment.text.strip()
@@ -312,6 +317,8 @@ def api_whisper(req: WhisperRequest):
 
         start_w = time.time()
 
+        print(f"   • Start Time: {datetime.fromtimestamp(start_w).strftime('%H:%M:%S')}")
+
         # =====================================================
         # 🔥 FASTER-WHISPER – TIMESTAMP FIRST CONFIG
         # =====================================================
@@ -371,18 +378,40 @@ def api_whisper(req: WhisperRequest):
             # 💾 SAVE SRT
             # =====================================================
             out_dir = os.path.dirname(path)
-            base = os.path.splitext(os.path.basename(path))[0].split('_')[0]
-            out_name = f"{base}_cn_{get_timestamp_str()}.srt"
-            full = os.path.join(out_dir, out_name)
+            base_filename = os.path.splitext(os.path.basename(path))[0].split('_')[0]
+            timestamp_str = get_timestamp_str()
 
-            write_srt_faster(segments_list, full)
+            output_files_list = []
 
-            Logger.success(f"Whisper xong ({len(segments_list)} câu)", elapsed)
+            # 1. Chia list to thành các chunks nhỏ
+            # Ví dụ: list 1200 câu, max 500 -> [500, 500, 200]
+            chunks = [segments_list[i:i + MAX_SEGMENTS_PER_FILE]
+                      for i in range(0, len(segments_list), MAX_SEGMENTS_PER_FILE)]
+
+            print(f"   ✂️  Chia thành {len(chunks)} phần (Max {MAX_SEGMENTS_PER_FILE} câu/file)...")
+
+            current_srt_index = 1
+
+            # 2. Lặp và ghi từng file
+            for idx, chunk in enumerate(chunks):
+                # Tạo tên file có số thứ tự: _part01, _part02...
+                part_suffix = f"_part{idx+1:02d}"
+                out_name = f"{base_filename}_cn_{timestamp_str}{part_suffix}.srt"
+                full_path = os.path.join(out_dir, out_name)
+
+                write_srt_faster(chunk, full_path, start_index=current_srt_index)
+                output_files_list.append(full_path)
+                print(f"      -> Đã ghi: {out_name} ({len(chunk)} câu) => 📂 {full_path}")
+                current_srt_index += len(chunk)
+
+            Logger.success(f"Whisper xong. Tổng {len(chunks)} files.", elapsed)
 
             return {
                 "status": "success",
                 "engine": "faster-whisper",
-                "output_file": full
+                "total_segments": len(segments_list),
+                "split_count": len(chunks),
+                "output_files": output_files_list  # Trả về danh sách file
             }
 
         # =====================================================
@@ -398,6 +427,7 @@ def api_whisper(req: WhisperRequest):
 
 @app.post("/api/v1/dubbing/tts-gen")
 async def api_tts(req: TtsRequest):
+    start_time = time.time()
     try:
         path = os.path.abspath(req.input_srt_path)
         subs = pysrt.open(path)
@@ -414,6 +444,7 @@ async def api_tts(req: TtsRequest):
         print("\n" + "="*90)
         print(f"🎙️  SMART TTS V2 (RE-GENERATION MODE)")
         print(f"   • Input: {os.path.basename(path)}")
+        print(f"   • Start Time: {datetime.fromtimestamp(start_time).strftime('%H:%M:%S')}")
         print("="*90)
 
         for i, sub in enumerate(subs):
@@ -561,7 +592,9 @@ async def api_tts(req: TtsRequest):
         out_name = f"{path.replace('.srt', '')}_audio_{get_timestamp_str()}.wav"
         sf.write(out_name, final_audio, SAMPLE_RATE)
 
+        elapsed = time.time() - start_time
         print("="*90)
+        print(f"   ⏱️  Tổng thời gian xử lý: {elapsed:.2f}s")
         Logger.success(f"TTS Hoàn tất: {out_name}")
         return {"status": "success", "output_file": out_name}
 
@@ -576,6 +609,7 @@ def api_mix(req: MixRequest):
 
     print("\n" + "="*70)
     print(f"🎬 [START] MIX VIDEO PROCESSING | Time: {get_timestamp_str()}")
+    print(f"   • Start Time: {datetime.fromtimestamp(start_time).strftime('%H:%M:%S')}")
     print("="*70)
 
     try:
@@ -732,6 +766,7 @@ def api_mix(req: MixRequest):
 
         elapsed = time.time() - start_time
         print("\n" + "="*70)
+        print(f"   ⏱️  Tổng thời gian xử lý: {elapsed:.2f}s")
         Logger.success(f"XỬ LÝ THÀNH CÔNG!", elapsed)
         print(f"   👉 KẾT QUẢ: {out}")
         print("="*70 + "\n")
