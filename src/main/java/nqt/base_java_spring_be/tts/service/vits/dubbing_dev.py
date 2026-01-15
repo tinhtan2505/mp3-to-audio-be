@@ -43,7 +43,7 @@ PORT = 8008  # 🔥 Cổng cố định
 # Options: "faster" (Khuyên dùng cho CPU) | "openai" (Gốc)
 WHISPER_BACKEND = "faster"
 WHISPER_MODEL_SIZE = "large-v3"
-MAX_SEGMENTS_PER_FILE = 500
+MAX_SEGMENTS_PER_FILE = 300
 
 # Audio Config
 SAMPLE_RATE = 24000
