@@ -71,4 +71,16 @@ public class DubbingController {
                     .body(CustomResponse.error("Lỗi Mix: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
         }
     }
+
+    @PostMapping("/vi/translate")
+    public ResponseEntity<CustomResponse<?>> translateSrt(@Valid @RequestBody DubbingFileRequest req) {
+        try {
+            DubbingResult data = dubbingService.translateSrt(req);
+            CustomResponse<DubbingResult> responseBody = CustomResponse.success(data, "Dịch thuật file SRT thành công");
+            return ResponseEntity.ok(responseBody);
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(CustomResponse.error("Lỗi dịch thuật: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
+        }
+    }
 }

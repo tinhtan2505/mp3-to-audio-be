@@ -6,7 +6,7 @@ import traceback
 import sys
 import shutil
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 
 # --- LIBROSA & AUDIO LIBS ---
@@ -23,6 +23,9 @@ from whisper.utils import get_writer
 from faster_whisper import WhisperModel
 import edge_tts
 from pathlib import Path
+
+import google.generativeai as genai # 🔥 NEW IMPORT
+from google.api_core import exceptions # 🔥 NEW IMPORT
 
 # --- FASTAPI ---
 import uvicorn
@@ -45,6 +48,35 @@ WHISPER_BACKEND = "faster"
 WHISPER_MODEL_SIZE = "large-v3"
 MAX_SEGMENTS_PER_FILE = 300
 
+# 🔥🔥🔥 CẤU HÌNH GEMINI TRANSLATE (NEW) 🔥🔥🔥
+GEMINI_API_KEY = "AIzaSyCXnrlISw4K86DwSR355LHJcuaiRHEd5Cs"  # <--- ĐIỀN API KEY CỦA BẠN VÀO ĐÂY
+TRANS_BATCH_SIZE = 20
+TRANS_DELAY_SECONDS = 4
+
+SYSTEM_INSTRUCTION_TRANS = """
+# VAI TRÒ:
+Bạn là "Cỗ máy chuyển ngữ phụ đề SRT Chính xác". Nhiệm vụ duy nhất của bạn là chuyển đổi dữ liệu ngôn ngữ từ Tiếng Trung sang Tiếng Việt.
+
+# ĐỐI TƯỢNG XỬ LÝ:
+Dòng phim: Tiên hiệp / Cổ trang / Xuyên không.
+
+# KỶ LUẬT SẮT (BẮT BUỘC TUÂN THỦ 100%):
+1. CƠ CHẾ KHÓA DỮ LIỆU:
+   - Chỉ dịch văn bản. KHÔNG tự động điền tiếp cốt truyện.
+   - Giữ nguyên ý nghĩa nhưng chuyển sang văn phong Tiên hiệp.
+
+2. CẤU TRÚC 1:1 (QUAN TRỌNG NHẤT):
+   - Input có bao nhiêu dòng, Output phải có chính xác bấy nhiêu dòng.
+   - Tuyệt đối KHÔNG gộp dòng, KHÔNG tách dòng.
+   - Trả về kết quả là danh sách các dòng đã dịch, ngăn cách bởi xuống dòng.
+
+3. PHONG CÁCH DỊCH THUẬT (CỔ TRANG):
+   - Đại từ: Ta, Đệ, Huynh, Muội, Sư phụ, Đồ nhi, Nàng, Chàng, Các hạ, Tại hạ... (Linh hoạt theo ngữ cảnh).
+   - KHÔNG dùng: Anh/Em/Cậu/Tớ (trừ khi nhân vật độc thoại nội tâm về hiện đại).
+   - Từ ngữ: Dùng Hán Việt cho thuật ngữ tu tiên (Thôn phệ, Linh lực, Thể chất, Bái kiến...).
+   - Văn phong: Ngắn gọn, súc tích (Lip-sync).
+"""
+
 # Audio Config
 SAMPLE_RATE = 24000
 DEFAULT_MUSIC_VOLUME = 0.4
@@ -59,6 +91,7 @@ VOICE_MALE = "vi-VN-NamMinhNeural"
 
 AI_MODELS = {
     "whisper": None,
+    "gemini_model": None,
     "device": "cpu"
 }
 
@@ -207,6 +240,61 @@ def check_system_requirements():
         print("      2. Đang dùng đúng Python trong .venv chưa?")
         print("      3. CUDA_VISIBLE_DEVICES=%CUDA_VISIBLE_DEVICES%")
 
+def call_gemini_api(text_list):
+    """Gửi request lên Gemini"""
+    if not AI_MODELS["gemini_model"]: return None
+
+    prompt_content = "Dịch danh sách các dòng thoại sau (giữ nguyên số lượng dòng):\n"
+    for i, txt in enumerate(text_list):
+        prompt_content += f"Line_{i}: {txt}\n"
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            time.sleep(TRANS_DELAY_SECONDS) # Rate Limit
+            response = AI_MODELS["gemini_model"].generate_content(
+                prompt_content,
+                generation_config=genai.types.GenerationConfig(temperature=0.1)
+            )
+            raw_text = response.text.strip()
+            translated_lines = []
+            for line in raw_text.split('\n'):
+                clean_line = line.strip()
+                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
+                    clean_line = clean_line.split(":", 1)[1].strip()
+                elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
+                    clean_line = clean_line.split(' ', 1)[1].strip()
+                if clean_line: translated_lines.append(clean_line)
+            return translated_lines
+        except Exception as e:
+            print(f"      [Gemini Warn] Lỗi API (Lần {attempt+1}): {e}")
+            time.sleep(10)
+    return None
+
+def process_batch_recursive(subs_slice, start_index):
+    """Thuật toán 'Chia để trị' xử lý lệch dòng."""
+    original_texts = [sub.text for sub in subs_slice]
+    count = len(original_texts)
+
+    if count == 0: return []
+
+    translated_results = call_gemini_api(original_texts)
+
+    if translated_results and len(translated_results) == count:
+        return translated_results
+
+    print(f"  [!!!] PHÁT HIỆN LỆCH DÒNG tại dòng {start_index + 1}. Chia nhỏ để xử lý lại...")
+
+    if count == 1:
+        print(f"  [Fail] Dòng {start_index + 1} AI bó tay. Giữ nguyên gốc.")
+        return [f"[LỖI] {original_texts[0]}"]
+
+    mid = count // 2
+    part1 = process_batch_recursive(subs_slice[:mid], start_index)
+    part2 = process_batch_recursive(subs_slice[mid:], start_index + mid)
+
+    return part1 + part2
+
 def load_ai_models():
     Logger.section(f"BƯỚC 2: LOAD AI MODELS (MODE: {WHISPER_BACKEND.upper()})")
 
@@ -253,6 +341,22 @@ def load_ai_models():
     except Exception as e:
         Logger.error("Lỗi Load Whisper", e)
 
+    if GEMINI_API_KEY and "AIza" in GEMINI_API_KEY:
+        try:
+            genai.configure(api_key=GEMINI_API_KEY)
+
+            # 🔥 KHỞI TẠO MODEL VỚI SYSTEM INSTRUCTION TẠI ĐÂY 🔥
+            AI_MODELS["gemini_model"] = genai.GenerativeModel(
+                model_name='models/gemini-2.5-flash',
+                system_instruction=SYSTEM_INSTRUCTION_TRANS  # <--- Biến chứa Prompt Kỷ Luật Sắt
+            )
+            Logger.success("Gemini API Configured & Ready")
+        except Exception as e:
+            Logger.warning(f"Lỗi cấu hình Gemini: {e}")
+            AI_MODELS["gemini_model"] = None
+    else:
+        Logger.warning("⚠️ Chưa có GEMINI_API_KEY hợp lệ. Tính năng dịch sẽ không hoạt động.")
+
 # ============================================
 # 4. LIFESPAN
 # ============================================
@@ -282,6 +386,9 @@ async def generate_tts(text, voice, output_file, rate="+0%"):
 class WhisperRequest(BaseModel):
     input_path: str
     enable_diarization: bool = False
+
+class TranslateRequest(BaseModel):
+    input_srt_path: str
 
 class TtsRequest(BaseModel): input_srt_path: str
 class MixRequest(BaseModel):
@@ -424,6 +531,92 @@ def api_whisper(req: WhisperRequest):
         Logger.error("Whisper Error", e)
         raise HTTPException(500, str(e))
 
+# --- 2. TRANSLATE API (NEW 🔥) ---
+@app.post("/api/v1/dubbing/translate")
+def api_translate(req: TranslateRequest):
+    start_time = time.time()
+    start_str = datetime.now().strftime("%H:%M:%S")
+
+    print("\n" + "="*70)
+    print(f"🌏 [START] GEMINI TRANSLATION | Time: {start_str}")
+    print(f"   • Input: {req.input_srt_path}")
+    print("="*70)
+
+    if not AI_MODELS["gemini_model"]:
+        raise HTTPException(500, "Gemini chưa được cấu hình Key!")
+
+    try:
+        input_path = os.path.abspath(req.input_srt_path)
+        if not os.path.exists(input_path): raise FileNotFoundError(f"File not found: {input_path}")
+
+        # Output Path
+        dir_name, base_name = os.path.split(input_path)
+        file_root, _ = os.path.splitext(base_name)
+        output_filename = f"{file_root}_vi_TiênHiệp.srt"
+        output_path = os.path.join(dir_name, output_filename)
+
+        # Load SRT
+        try:
+            subs = pysrt.open(input_path)
+        except Exception:
+            subs = pysrt.open(input_path, encoding='utf-8')
+
+        total_subs = len(subs)
+        print(f"   📚 Tổng số dòng thoại: {total_subs}")
+
+        # --- PROCESS BATCHES ---
+        for i in range(0, total_subs, TRANS_BATCH_SIZE):
+            batch_start = time.time()
+            current_batch = subs[i : i + TRANS_BATCH_SIZE]
+
+            # Gọi hàm đệ quy
+            translated_texts = process_batch_recursive(current_batch, i)
+
+            batch_dur = time.time() - batch_start
+
+            print("\n" + "-"*40)
+            print(f"📥 BATCH: {min(i + TRANS_BATCH_SIZE, total_subs)}/{total_subs} | ⏳ {batch_dur:.2f}s")
+            print("-"*40)
+
+            # Update & Log
+            for j, new_text in enumerate(translated_texts):
+                idx = i + j
+                if idx >= total_subs: break
+
+                sub_item = subs[idx]
+                orig_cn = sub_item.text
+                sub_item.text = new_text # Update text
+
+                print(f"#{sub_item.index} [{sub_item.start} -> {sub_item.end}]")
+                print(f"🇨🇳 {orig_cn}")
+                print(f"🇻🇳 {new_text}")
+                print("." * 20)
+
+            # Checkpoint Save
+            print(f"   💾 Checkpoint save...")
+            subs.save(output_path, encoding='utf-8')
+
+        # Final Save & Report
+        subs.save(output_path, encoding='utf-8')
+        elapsed = time.time() - start_time
+
+        print("\n" + "="*70)
+        print(f"✅ DỊCH HOÀN TẤT!")
+        print(f"⏱️  Tổng thời gian: {timedelta(seconds=int(elapsed))}")
+        print(f"💾 Output: {output_path}")
+        print("="*70 + "\n")
+
+        return {
+            "status": "success",
+            "output_file": output_path,
+            "total_lines": total_subs,
+            "elapsed_seconds": elapsed
+        }
+
+    except Exception as e:
+        Logger.error("Translate Error", e)
+        traceback.print_exc()
+        raise HTTPException(500, str(e))
 
 @app.post("/api/v1/dubbing/tts-gen")
 async def api_tts(req: TtsRequest):

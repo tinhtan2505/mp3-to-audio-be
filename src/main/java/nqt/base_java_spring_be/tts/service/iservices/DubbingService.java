@@ -8,4 +8,5 @@ public interface DubbingService {
     DubbingResult dubbingFromWhisper(DubbingFileRequest req);
     DubbingResult generateDubbingAudio(DubbingFileRequest req);
     DubbingResult mixVideo(MixVideoRequest req);
+    DubbingResult translateSrt(DubbingFileRequest req);
 }

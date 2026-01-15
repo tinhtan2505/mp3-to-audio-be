@@ -29,6 +29,9 @@ public class DubbingServiceImpl implements DubbingService {
     @Value("${app.tts.python-mix-url}")
     private String pythonMixUrl;
 
+    @Value("${app.tts.python-translate-url}") // Cần thêm key này vào file cấu hình
+    private String pythonTranslateUrl;
+
     public DubbingServiceImpl() {
         this.restTemplate = new RestTemplate();
     }
@@ -222,6 +225,64 @@ public class DubbingServiceImpl implements DubbingService {
         } catch (Exception e) {
             e.printStackTrace();
             throw new RuntimeException("Lỗi Service Mix: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public DubbingResult translateSrt(DubbingFileRequest req) {
+        String inputPath = req.getInputPath();
+
+        // 1. Validate file
+        File f = new File(inputPath);
+        if (!f.exists()) {
+            throw new RuntimeException("File SRT gốc không tồn tại: " + inputPath);
+        }
+
+        try {
+            // 2. Gọi Python Service
+            Map<String, Object> pythonResponse = callPythonTranslateService(inputPath);
+
+            // 3. Xử lý kết quả
+            String status = (String) pythonResponse.get("status");
+            if ("success".equalsIgnoreCase(status)) {
+                String outputFilePath = (String) pythonResponse.get("output_file");
+                System.out.println("-> Python Translate trả về file tại: " + outputFilePath);
+                return new DubbingResult("success", outputFilePath);
+            } else {
+                throw new RuntimeException("Python trả về lỗi: " + pythonResponse);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Lỗi Service Translate: " + e.getMessage());
+        }
+    }
+
+    // Helper gọi Python
+    private Map<String, Object> callPythonTranslateService(String inputPath) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            // Body: {"input_srt_path": "..."} - Key phải khớp với Python Model TranslateRequest
+            Map<String, Object> body = new HashMap<>();
+            body.put("input_srt_path", inputPath);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    pythonTranslateUrl,
+                    org.springframework.http.HttpMethod.POST,
+                    entity,
+                    new ParameterizedTypeReference<Map<String, Object>>() {}
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                return response.getBody();
+            } else {
+                throw new RuntimeException("Lỗi HTTP Python Translate: " + response.getStatusCode());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Không kết nối được Python Translate API: " + e.getMessage());
         }
     }
 }
