@@ -24,6 +24,8 @@ from faster_whisper import WhisperModel
 import edge_tts
 from pathlib import Path
 
+from openai import OpenAI
+
 import google.generativeai as genai # 🔥 NEW IMPORT
 from google.api_core import exceptions # 🔥 NEW IMPORT
 
@@ -54,28 +56,59 @@ TRANS_BATCH_SIZE = 20
 TRANS_DELAY_SECONDS = 4
 
 SYSTEM_INSTRUCTION_TRANS = """
-# VAI TRÒ:
-Bạn là "Cỗ máy chuyển ngữ phụ đề SRT Chính xác". Nhiệm vụ duy nhất của bạn là chuyển đổi dữ liệu ngôn ngữ từ Tiếng Trung sang Tiếng Việt.
+Bạn là một Dịch Giả Tiên Hiệp/Huyền Huyễn lão luyện (như Lão Bản, Vong Ngữ).
+Nhiệm vụ: Dịch phụ đề phim từ Tiếng Trung sang Tiếng Việt.
 
-# ĐỐI TƯỢNG XỬ LÝ:
-Dòng phim: Tiên hiệp / Cổ trang / Xuyên không.
+### 1. QUY TẮC CỐT LÕI (BẮT BUỘC):
+- **THOÁT Ý:** Không dịch word-by-word (Google Translate). Phải dịch theo ngữ cảnh, sắp xếp lại câu từ cho thuần Việt.
+- **VĂN PHONG:** Cổ trang, kiếm hiệp, câu từ ngắn gọn, đanh thép (để lồng tiếng).
+- **CẤU TRÚC:** Giữ nguyên số lượng dòng và format `Line_x: [Nội dung]`.
 
-# KỶ LUẬT SẮT (BẮT BUỘC TUÂN THỦ 100%):
-1. CƠ CHẾ KHÓA DỮ LIỆU:
-   - Chỉ dịch văn bản. KHÔNG tự động điền tiếp cốt truyện.
-   - Giữ nguyên ý nghĩa nhưng chuyển sang văn phong Tiên hiệp.
+### 2. CẤU TRÚC CÂU (QUAN TRỌNG):
+- Câu hỏi tu từ: "这不正是...吗" -> Dịch: **"Chẳng phải là... sao?"** (Hay hơn "Đây không phải là...").
+- Câu cảm thán: Dùng từ đệm: **"Chậc"**, **"Hừ"**, **"Sao?"**.
 
-2. CẤU TRÚC 1:1 (QUAN TRỌNG NHẤT):
-   - Input có bao nhiêu dòng, Output phải có chính xác bấy nhiêu dòng.
-   - Tuyệt đối KHÔNG gộp dòng, KHÔNG tách dòng.
-   - Trả về kết quả là danh sách các dòng đã dịch, ngăn cách bởi xuống dòng.
+### 3. QUY TẮC CẤM KỴ (VI PHẠM LÀ HỎNG):
+-  **CẤM TIẾNG ANH:** Tuyệt đối KHÔNG xuất hiện từ tiếng Anh (như: Too good, Goods, Looks like...).
+-  **CẤM TIẾNG TRUNG:** Nếu không dịch được, hãy phiên âm Hán Việt.
+- **Xưng hô:** Ta - Ngươi, Sư phụ - Đồ nhi, Tỷ tỷ - Muội muội.
 
-3. PHONG CÁCH DỊCH THUẬT (CỔ TRANG):
-   - Đại từ: Ta, Đệ, Huynh, Muội, Sư phụ, Đồ nhi, Nàng, Chàng, Các hạ, Tại hạ... (Linh hoạt theo ngữ cảnh).
-   - KHÔNG dùng: Anh/Em/Cậu/Tớ (trừ khi nhân vật độc thoại nội tâm về hiện đại).
-   - Từ ngữ: Dùng Hán Việt cho thuật ngữ tu tiên (Thôn phệ, Linh lực, Thể chất, Bái kiến...).
-   - Văn phong: Ngắn gọn, súc tích (Lip-sync).
+### 4. VÍ DỤ SỬA LỖI:
+Input:
+Line_0: Looks like 我捡到宝贝了
+Line_1: 你的体质是Goods
+Line_2: 练到一定程度
+
+Output:
+Line_0: Xem ra ta nhặt được bảo vật rồi.
+Line_1: Thể chất của ngươi đúng là hàng hiếm.
+Line_2: Luyện đến một trình độ nhất định.
+
+### VÍ DỤ MẪU (BẮT BUỘC HỌC THEO VĂN PHONG NÀY):
+
+Input:
+Line_0: 我不是躺在床上看小说吗
+Line_1: 这不正是秦峰要被林燕儿退婚的剧情吗
+Line_2: 女帝跟班
+Line_3: 你就算装傻充愣
+Line_4: 我未婚妻
+
+Output:
+Line_0: Chẳng phải ta đang nằm trên giường đọc tiểu thuyết sao?
+Line_1: Đây chẳng phải là tình tiết Tần Phong bị Lâm Yến Nhi hủy hôn sao?
+Line_2: Làm đàn em của Nữ Đế?
+Line_3: Ngươi dù có giả ngu giả ngơ,
+Line_4: Vị hôn thê của ta.
 """
+
+# 🔥 OLLAMA TRANSLATION CONFIGURATION (REPLACES GEMINI)
+# Note: Ensure Ollama is running locally (default port 11434)
+OLLAMA_BASE_URL = 'http://localhost:11434/v1'
+OLLAMA_API_KEY = 'ollama' # Dummy key, required by client but not checked
+OLLAMA_MODEL_NAME = "qwen2.5:7b" # or "qwen2.5:7b" depending on your VRAM qwen2.5:14
+
+TRANS_BATCH_SIZE = 20
+TRANS_DELAY_SECONDS = 1 # Ollama runs locally, less delay needed, but good for stability
 
 # Audio Config
 SAMPLE_RATE = 24000
@@ -92,6 +125,7 @@ VOICE_MALE = "vi-VN-NamMinhNeural"
 AI_MODELS = {
     "whisper": None,
     "gemini_model": None,
+    "ollama_client": None,
     "device": "cpu"
 }
 
@@ -295,6 +329,95 @@ def process_batch_recursive(subs_slice, start_index):
 
     return part1 + part2
 
+def call_ollama_api(text_list):
+    """
+    Sends text to local Ollama instance for translation.
+    Replaces call_gemini_api.
+    """
+    client = AI_MODELS["ollama_client"]
+    if not client:
+        print("   ❌ Ollama client not initialized.")
+        return None
+
+    # Prepare Prompt
+    # Join text with Line_x prefix for structured output
+    input_text_block = "\n".join([f"Line_{i}: {txt}" for i, txt in enumerate(text_list)])
+
+    user_prompt = f"""
+    Dịch khối văn bản sau sang Tiếng Việt chuẩn Tiên Hiệp:
+    
+    {input_text_block}
+    """
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            # Slight delay to let GPU cool down if needed (optional for local)
+            time.sleep(TRANS_DELAY_SECONDS)
+
+            response = client.chat.completions.create(
+                model=OLLAMA_MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_INSTRUCTION_TRANS},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1, # Low temp for precision
+            )
+
+            # Process Result
+            raw_text = response.choices[0].message.content.strip()
+            translated_lines = []
+
+            # Parse "Line_x:" output
+            for line in raw_text.split('\n'):
+                clean_line = line.strip()
+                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
+                    # Split by first colon only
+                    parts = clean_line.split(":", 1)
+                    if len(parts) > 1:
+                        translated_lines.append(parts[1].strip())
+                elif clean_line:
+                    # Fallback: if AI forgets Line prefix, take the line as is
+                    # (Though Qwen is usually good at following format)
+                    translated_lines.append(clean_line)
+
+            return translated_lines
+
+        except Exception as e:
+            print(f"      [Ollama Error] Attempt {attempt+1}: {e}")
+            # If connection refused (Ollama not running), wait a bit
+            time.sleep(5)
+
+    return None
+
+def process_batch_recursive_ollama(subs_slice, start_index):
+    """Recursive batch processing to handle line mismatches."""
+    original_texts = [sub.text for sub in subs_slice]
+    count = len(original_texts)
+
+    if count == 0: return []
+
+    # Call Ollama instead of Gemini
+    translated_results = call_ollama_api(original_texts)
+
+    # Check strict 1:1 mapping
+    if translated_results and len(translated_results) == count:
+        return translated_results
+
+    print(f"  [!!!] LINE MISMATCH at line {start_index + 1}. Input: {count}, Output: {len(translated_results) if translated_results else 0}. Splitting batch...")
+
+    # Fallback for single line failure
+    if count == 1:
+        print(f"  [Fail] Line {start_index + 1} translation failed. Keeping original.")
+        return [f"[ERROR] {original_texts[0]}"]
+
+    # Divide and Conquer
+    mid = count // 2
+    part1 = process_batch_recursive_ollama(subs_slice[:mid], start_index)
+    part2 = process_batch_recursive_ollama(subs_slice[mid:], start_index + mid)
+
+    return part1 + part2
+
 def load_ai_models():
     Logger.section(f"BƯỚC 2: LOAD AI MODELS (MODE: {WHISPER_BACKEND.upper()})")
 
@@ -341,21 +464,43 @@ def load_ai_models():
     except Exception as e:
         Logger.error("Lỗi Load Whisper", e)
 
-    if GEMINI_API_KEY and "AIza" in GEMINI_API_KEY:
-        try:
-            genai.configure(api_key=GEMINI_API_KEY)
+    # if GEMINI_API_KEY and "AIza" in GEMINI_API_KEY:
+    #     try:
+    #         genai.configure(api_key=GEMINI_API_KEY)
+    #
+    #         # 🔥 KHỞI TẠO MODEL VỚI SYSTEM INSTRUCTION TẠI ĐÂY 🔥
+    #         AI_MODELS["gemini_model"] = genai.GenerativeModel(
+    #             model_name='models/gemini-2.5-flash',
+    #             system_instruction=SYSTEM_INSTRUCTION_TRANS  # <--- Biến chứa Prompt Kỷ Luật Sắt
+    #         )
+    #         Logger.success("Gemini API Configured & Ready")
+    #     except Exception as e:
+    #         Logger.warning(f"Lỗi cấu hình Gemini: {e}")
+    #         AI_MODELS["gemini_model"] = None
+    # else:
+    #     Logger.warning("⚠️ Chưa có GEMINI_API_KEY hợp lệ. Tính năng dịch sẽ không hoạt động.")
+    # 2. CONFIG OLLAMA CLIENT (Replaces Gemini)
+    print(f"\n⏳ Configuring Ollama Client ({OLLAMA_MODEL_NAME})...")
+    try:
+        # Initialize OpenAI compatible client pointing to local Ollama
+        client = OpenAI(
+            base_url=OLLAMA_BASE_URL,
+            api_key=OLLAMA_API_KEY
+        )
+        AI_MODELS["ollama_client"] = client
 
-            # 🔥 KHỞI TẠO MODEL VỚI SYSTEM INSTRUCTION TẠI ĐÂY 🔥
-            AI_MODELS["gemini_model"] = genai.GenerativeModel(
-                model_name='models/gemini-2.5-flash',
-                system_instruction=SYSTEM_INSTRUCTION_TRANS  # <--- Biến chứa Prompt Kỷ Luật Sắt
-            )
-            Logger.success("Gemini API Configured & Ready")
-        except Exception as e:
-            Logger.warning(f"Lỗi cấu hình Gemini: {e}")
-            AI_MODELS["gemini_model"] = None
-    else:
-        Logger.warning("⚠️ Chưa có GEMINI_API_KEY hợp lệ. Tính năng dịch sẽ không hoạt động.")
+        # Simple test to check connection
+        try:
+            client.models.list()
+            Logger.success(f"Ollama Connected at {OLLAMA_BASE_URL}")
+        except Exception as conn_err:
+            Logger.warning(f"Could not connect to Ollama: {conn_err}. Make sure Ollama app is running.")
+
+        Logger.success(f"Ollama Client Configured (Target: {OLLAMA_MODEL_NAME})")
+
+    except Exception as e:
+        Logger.error("Error Configuring Ollama", e)
+        AI_MODELS["ollama_client"] = None
 
 # ============================================
 # 4. LIFESPAN
@@ -532,77 +677,157 @@ def api_whisper(req: WhisperRequest):
         raise HTTPException(500, str(e))
 
 # --- 2. TRANSLATE API (NEW 🔥) ---
+# @app.post("/api/v1/dubbing/translate")
+# def api_translate(req: TranslateRequest):
+#     start_time = time.time()
+#     start_str = datetime.now().strftime("%H:%M:%S")
+#
+#     print("\n" + "="*70)
+#     print(f"🌏 [START] GEMINI TRANSLATION | Time: {start_str}")
+#     print(f"   • Input: {req.input_srt_path}")
+#     print("="*70)
+#
+#     if not AI_MODELS["gemini_model"]:
+#         raise HTTPException(500, "Gemini chưa được cấu hình Key!")
+#
+#     try:
+#         input_path = os.path.abspath(req.input_srt_path)
+#         if not os.path.exists(input_path): raise FileNotFoundError(f"File not found: {input_path}")
+#
+#         # Output Path
+#         dir_name, base_name = os.path.split(input_path)
+#         file_root, _ = os.path.splitext(base_name)
+#         output_filename = f"{file_root}_vi_TiênHiệp.srt"
+#         output_path = os.path.join(dir_name, output_filename)
+#
+#         # Load SRT
+#         try:
+#             subs = pysrt.open(input_path)
+#         except Exception:
+#             subs = pysrt.open(input_path, encoding='utf-8')
+#
+#         total_subs = len(subs)
+#         print(f"   📚 Tổng số dòng thoại: {total_subs}")
+#
+#         # --- PROCESS BATCHES ---
+#         for i in range(0, total_subs, TRANS_BATCH_SIZE):
+#             batch_start = time.time()
+#             current_batch = subs[i : i + TRANS_BATCH_SIZE]
+#
+#             # Gọi hàm đệ quy
+#             translated_texts = process_batch_recursive(current_batch, i)
+#
+#             batch_dur = time.time() - batch_start
+#
+#             print("\n" + "-"*40)
+#             print(f"📥 BATCH: {min(i + TRANS_BATCH_SIZE, total_subs)}/{total_subs} | ⏳ {batch_dur:.2f}s")
+#             print("-"*40)
+#
+#             # Update & Log
+#             for j, new_text in enumerate(translated_texts):
+#                 idx = i + j
+#                 if idx >= total_subs: break
+#
+#                 sub_item = subs[idx]
+#                 orig_cn = sub_item.text
+#                 sub_item.text = new_text # Update text
+#
+#                 print(f"#{sub_item.index} [{sub_item.start} -> {sub_item.end}]")
+#                 print(f"🇨🇳 {orig_cn}")
+#                 print(f"🇻🇳 {new_text}")
+#                 print("." * 20)
+#
+#             # Checkpoint Save
+#             print(f"   💾 Checkpoint save...")
+#             subs.save(output_path, encoding='utf-8')
+#
+#         # Final Save & Report
+#         subs.save(output_path, encoding='utf-8')
+#         elapsed = time.time() - start_time
+#
+#         print("\n" + "="*70)
+#         print(f"✅ DỊCH HOÀN TẤT!")
+#         print(f"⏱️  Tổng thời gian: {timedelta(seconds=int(elapsed))}")
+#         print(f"💾 Output: {output_path}")
+#         print("="*70 + "\n")
+#
+#         return {
+#             "status": "success",
+#             "output_file": output_path,
+#             "total_lines": total_subs,
+#             "elapsed_seconds": elapsed
+#         }
+#
+#     except Exception as e:
+#         Logger.error("Translate Error", e)
+#         traceback.print_exc()
+#         raise HTTPException(500, str(e))
+
+# --- 2. TRANSLATE API (OLLAMA VERSION) ---
 @app.post("/api/v1/dubbing/translate")
 def api_translate(req: TranslateRequest):
     start_time = time.time()
     start_str = datetime.now().strftime("%H:%M:%S")
 
     print("\n" + "="*70)
-    print(f"🌏 [START] GEMINI TRANSLATION | Time: {start_str}")
+    print(f"🌏 [START] OLLAMA TRANSLATION | Time: {start_str}")
     print(f"   • Input: {req.input_srt_path}")
+    print(f"   • Model: {OLLAMA_MODEL_NAME}")
     print("="*70)
 
-    if not AI_MODELS["gemini_model"]:
-        raise HTTPException(500, "Gemini chưa được cấu hình Key!")
+    if not AI_MODELS["ollama_client"]:
+        raise HTTPException(500, "Ollama client not configured")
 
     try:
         input_path = os.path.abspath(req.input_srt_path)
         if not os.path.exists(input_path): raise FileNotFoundError(f"File not found: {input_path}")
 
-        # Output Path
         dir_name, base_name = os.path.split(input_path)
         file_root, _ = os.path.splitext(base_name)
-        output_filename = f"{file_root}_vi_TiênHiệp.srt"
+        output_filename = f"{file_root}_vi_Ollama.srt"
         output_path = os.path.join(dir_name, output_filename)
 
-        # Load SRT
         try:
             subs = pysrt.open(input_path)
         except Exception:
             subs = pysrt.open(input_path, encoding='utf-8')
 
         total_subs = len(subs)
-        print(f"   📚 Tổng số dòng thoại: {total_subs}")
+        print(f"   📚 Total Lines: {total_subs}")
 
         # --- PROCESS BATCHES ---
         for i in range(0, total_subs, TRANS_BATCH_SIZE):
             batch_start = time.time()
             current_batch = subs[i : i + TRANS_BATCH_SIZE]
 
-            # Gọi hàm đệ quy
-            translated_texts = process_batch_recursive(current_batch, i)
+            # Call Recursive Translate (Uses Ollama)
+            translated_texts = process_batch_recursive_ollama(current_batch, i)
 
             batch_dur = time.time() - batch_start
-
             print("\n" + "-"*40)
             print(f"📥 BATCH: {min(i + TRANS_BATCH_SIZE, total_subs)}/{total_subs} | ⏳ {batch_dur:.2f}s")
             print("-"*40)
 
-            # Update & Log
             for j, new_text in enumerate(translated_texts):
                 idx = i + j
                 if idx >= total_subs: break
-
                 sub_item = subs[idx]
                 orig_cn = sub_item.text
-                sub_item.text = new_text # Update text
-
+                sub_item.text = new_text # Update
                 print(f"#{sub_item.index} [{sub_item.start} -> {sub_item.end}]")
                 print(f"🇨🇳 {orig_cn}")
                 print(f"🇻🇳 {new_text}")
                 print("." * 20)
 
-            # Checkpoint Save
-            print(f"   💾 Checkpoint save...")
+            print(f"   💾 Checkpoint saving...")
             subs.save(output_path, encoding='utf-8')
 
-        # Final Save & Report
         subs.save(output_path, encoding='utf-8')
         elapsed = time.time() - start_time
 
         print("\n" + "="*70)
-        print(f"✅ DỊCH HOÀN TẤT!")
-        print(f"⏱️  Tổng thời gian: {timedelta(seconds=int(elapsed))}")
+        print(f"✅ TRANSLATION COMPLETE!")
+        print(f"⏱️  Total Time: {timedelta(seconds=int(elapsed))}")
         print(f"💾 Output: {output_path}")
         print("="*70 + "\n")
 

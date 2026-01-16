@@ -16,3 +16,4 @@ requests
 tqdm
 google.generativeai
 google.api_core
+openai
