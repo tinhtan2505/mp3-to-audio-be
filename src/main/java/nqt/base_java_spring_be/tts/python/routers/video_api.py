@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from schemas import MixRequest
-from config import *
+from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
 router = APIRouter()

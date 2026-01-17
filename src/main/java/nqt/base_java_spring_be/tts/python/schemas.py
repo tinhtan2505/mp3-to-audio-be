@@ -25,4 +25,4 @@ class MixRequest(BaseModel):
     logo_y: int = 30
     logo_w: int = 250
     logo_h: int = 40
-    branding_text: str = "NQT REVIEW"
+    branding_text: str = "NQT DRAMA REVIEW"
