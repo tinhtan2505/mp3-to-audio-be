@@ -8,6 +8,84 @@ from utils import Logger, get_timestamp_str, write_srt_faster, normalize_segment
 
 router = APIRouter()
 
+def filter_repeated_segments(segments_list, max_repetition=3):
+    """
+    Lọc bỏ các segment lặp lại liên tiếp
+    max_repetition: Số lần cho phép lặp text giống nhau
+    """
+    if not segments_list:
+        return []
+
+    filtered = []
+    prev_texts = []
+    repetition_count = 0
+
+    for seg in segments_list:
+        # Xử lý cả dict và object
+        if isinstance(seg, dict):
+            text = seg.get('text', '').strip()
+        else:
+            text = getattr(seg, 'text', '').strip()
+
+        # Bỏ qua segment rỗng hoặc quá ngắn
+        if not text or len(text) < 2:
+            continue
+
+        # Kiểm tra lặp lại
+        if text in prev_texts[-max_repetition:]:
+            repetition_count += 1
+            # Nếu lặp quá nhiều, bỏ qua
+            if repetition_count >= max_repetition:
+                continue
+        else:
+            repetition_count = 0
+
+        filtered.append(seg)
+        prev_texts.append(text)
+
+        # Giữ lịch sử 10 câu gần nhất
+        if len(prev_texts) > 10:
+            prev_texts.pop(0)
+
+    return filtered
+
+
+def detect_hallucination(segments_list):
+    """
+    Phát hiện hallucination bằng cách kiểm tra:
+    - Câu lặp quá nhiều lần
+    - Câu quá ngắn (1-2 ký tự)
+    - Tỷ lệ câu giống nhau cao
+    """
+    if len(segments_list) < 10:
+        return False
+
+    text_counts = {}
+    short_count = 0
+
+    for seg in segments_list:
+        # Xử lý cả dict và object
+        if isinstance(seg, dict):
+            text = seg.get('text', '').strip()
+        else:
+            text = getattr(seg, 'text', '').strip()
+
+        text_counts[text] = text_counts.get(text, 0) + 1
+        if len(text) <= 2:
+            short_count += 1
+
+    # Nếu >30% câu quá ngắn => hallucination
+    if short_count / len(segments_list) > 0.3:
+        return True
+
+    # Nếu 1 câu lặp >20% tổng số => hallucination
+    max_repeat = max(text_counts.values())
+    if max_repeat / len(segments_list) > 0.2:
+        return True
+
+    return False
+
+
 @router.post("/api/v1/dubbing/whisper")
 def api_whisper(req: WhisperRequest):
     if not AI_MODELS["whisper"]:
@@ -40,10 +118,17 @@ def api_whisper(req: WhisperRequest):
             # Chuẩn hóa thời gian
             segments_list = [normalize_segment_time(seg) for seg in segments]
 
+            original_count = len(segments_list)
+            segments_list = filter_repeated_segments(segments_list, max_repetition=2)
+            filtered_count = original_count - len(segments_list)
+            if detect_hallucination(segments_list):
+                print("\n⚠️  CẢNH BÁO: Phát hiện hallucination!")
+                print("   Khuyến nghị: Kiểm tra lại file audio hoặc giảm độ dài")
+
             elapsed = time.time() - start_w
             print(f"\n📊 THỐNG KÊ:")
             print(f"   • Ngôn ngữ: {info.language} (Độ tin cậy: {info.language_probability:.2%})")
-            print(f"   • Tổng số câu: {len(segments_list)}")
+            print(f"   • Tổng số câu: {len(segments_list)} (Đã lọc: {filtered_count})")
             print(f"   • Thời gian: {elapsed:.2f}s")
 
             # Lưu file SRT (Chia nhỏ nếu cần)
