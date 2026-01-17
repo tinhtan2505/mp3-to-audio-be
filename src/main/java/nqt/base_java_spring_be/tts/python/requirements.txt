@@ -1,0 +1,20 @@
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+torch
+torchaudio
+openai-whisper
+faster_whisper
+edge-tts
+pysrt
+librosa
+soundfile
+numpy
+fastapi
+uvicorn
+pydantic
+requests
+tqdm
+google.generativeai
+google.api_core
+openai
+deep_translator
