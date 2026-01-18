@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import time
 import subprocess
@@ -56,41 +57,43 @@ def api_mix(req: MixRequest):
         video_codec = "copy"
 
         if req.remove_logo:
+            import random
             print("   🛡️  Chèn Thương hiệu & Bản quyền: BẬT")
             brand = req.branding_text
-            font_file = "Arial" # Tìm font trong thư mục nếu có
+
+            # Tìm font
+            font_file = "Arial"
             for f in os.listdir(video_dir):
                 if f.lower().endswith(('.ttf', '.otf')):
                     font_file = Path(video_dir).joinpath(f).as_posix().replace(":", "\\:")
                     break
 
             # Random tỷ lệ scale nhỏ (từ 1.001 đến 1.005)
-            import random
-            random.seed(int(time.time() * 1000))  # Seed dựa trên thời gian
+            random.seed(int(time.time() * 1000))
             scale_w = round(1 + random.uniform(0.001, 0.005), 4)
             scale_h = round(1 + random.uniform(0.001, 0.005), 4)
             print(f"   🎲 Random scale: {scale_w}x{scale_h}")
 
+            # Escape text để tránh lỗi với ký tự đặc biệt
+            brand_escaped = brand.replace(":", "\\:").replace("'", "\\'")
+            copyright_text = "Ban quyen NQT DRAMA REVIEW"
+
+            # Scale và làm tròn về số chẵn (chia hết cho 2)
             video_filter = (
-                # Thay đổi nhỏ kích thước video để tránh bị gậy bản quyền
-                f"[0:v]scale=iw*{scale_w}:ih*{scale_h},setsar=1[v_scaled];"
-        
-                # Chèn thương hiệu cố định
-                f"[v_scaled]drawtext=fontfile='{font_file}':text='{brand}':fontcolor=white:fontsize=24:"
-                f"box=1:boxcolor=black@0.6:boxborderw=5:x={req.logo_x}+(({req.logo_w}-text_w)/2):"
-                f"y={req.logo_y}+(({req.logo_h}-text_h)/2)[v_branded];"
-        
-                # Chèn bản quyền (hiện sau 5 phút, hiển thị 5 giây)
-                f"[v_branded]drawtext=fontfile='{font_file}':text='Bản quyền NQT DRAMA REVIEW':"
+                f"[0:v]scale=iw*{scale_w}:ih*{scale_h},scale='trunc(iw/2)*2':'trunc(ih/2)*2',setsar=1[v_scaled];"
+                f"[v_scaled]drawtext=fontfile='{font_file}':text='{brand_escaped}':"
+                f"fontcolor=white:fontsize=24:box=1:boxcolor=black@0.6:boxborderw=5:"
+                f"x={req.logo_x}+(({req.logo_w}-text_w)/2):y={req.logo_y}+(({req.logo_h}-text_h)/2)[v_branded];"
+                f"[v_branded]drawtext=fontfile='{font_file}':text='{copyright_text}':"
                 f"fontcolor=white:fontsize=28:box=1:boxcolor=black@0.7:boxborderw=5:"
-                f"x=(w-text_w)/2:y=h-80:"
-                f"enable='between(t,300,305)'[v_final]"
+                f"x=(w-text_w)/2:y=h-80:enable='between(t\\,300\\,305)'[v_final];"
             )
             video_map = "[v_final]"
             video_codec = "libx264"
 
         # Tổng hợp lệnh
         full_filter = (video_filter + audio_filter) if video_filter else audio_filter
+
         cmd = ["ffmpeg", "-y"] + inputs + [
             "-filter_complex", full_filter,
             "-map", video_map, "-map", "[a_out]",
@@ -108,7 +111,7 @@ def api_mix(req: MixRequest):
 
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
-        print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-10:]))
+        print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-15:]))
         raise HTTPException(500, "Lỗi khi chạy FFmpeg")
     except Exception as e:
         Logger.error("Lỗi hệ thống", e)
