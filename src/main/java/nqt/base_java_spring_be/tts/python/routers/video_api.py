@@ -56,7 +56,7 @@ def api_mix(req: MixRequest):
         video_codec = "copy"
 
         if req.remove_logo:
-            print("   🛡️  Xóa Logo & Chèn Thương hiệu: BẬT")
+            print("   🛡️  Chèn Thương hiệu & Bản quyền: BẬT")
             brand = req.branding_text
             font_file = "Arial" # Tìm font trong thư mục nếu có
             for f in os.listdir(video_dir):
@@ -64,13 +64,29 @@ def api_mix(req: MixRequest):
                     font_file = Path(video_dir).joinpath(f).as_posix().replace(":", "\\:")
                     break
 
+            # Random tỷ lệ scale nhỏ (từ 1.001 đến 1.005)
+            import random
+            random.seed(int(time.time() * 1000))  # Seed dựa trên thời gian
+            scale_w = round(1 + random.uniform(0.001, 0.005), 4)
+            scale_h = round(1 + random.uniform(0.001, 0.005), 4)
+            print(f"   🎲 Random scale: {scale_w}x{scale_h}")
+
             video_filter = (
-                f"[0:v]delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}[v_cl];"
-                f"[v_cl]drawtext=fontfile='{font_file}':text='{brand}':fontcolor=white:fontsize=24:"
+                # Thay đổi nhỏ kích thước video để tránh bị gậy bản quyền
+                f"[0:v]scale=iw*{scale_w}:ih*{scale_h},setsar=1[v_scaled];"
+        
+                # Chèn thương hiệu cố định
+                f"[v_scaled]drawtext=fontfile='{font_file}':text='{brand}':fontcolor=white:fontsize=24:"
                 f"box=1:boxcolor=black@0.6:boxborderw=5:x={req.logo_x}+(({req.logo_w}-text_w)/2):"
                 f"y={req.logo_y}+(({req.logo_h}-text_h)/2)[v_branded];"
+        
+                # Chèn bản quyền (hiện sau 5 phút, hiển thị 5 giây)
+                f"[v_branded]drawtext=fontfile='{font_file}':text='Bản quyền NQT DRAMA REVIEW':"
+                f"fontcolor=white:fontsize=28:box=1:boxcolor=black@0.7:boxborderw=5:"
+                f"x=(w-text_w)/2:y=h-80:"
+                f"enable='between(t,300,305)'[v_final]"
             )
-            video_map = "[v_branded]"
+            video_map = "[v_final]"
             video_codec = "libx264"
 
         # Tổng hợp lệnh

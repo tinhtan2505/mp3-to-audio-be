@@ -68,32 +68,32 @@ def load_ai_models():
     except Exception as e:
         Logger.error("Lỗi tải Whisper", e)
 
-    # 2. Config Gemini
-    if GEMINI_API_KEY and "AIza" in GEMINI_API_KEY:
-        try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            AI_MODELS["gemini_model"] = genai.GenerativeModel(
-                model_name='models/gemini-2.5-flash',
-                system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
-            )
-            Logger.success("Gemini API đã sẵn sàng")
-        except Exception as e:
-            Logger.warning(f"Lỗi cấu hình Gemini: {e}")
-    else:
-        Logger.warning("⚠️ Chưa có GEMINI_API_KEY hợp lệ.")
-
-    # 3. Config Ollama
-    print(f"\n⏳ Đang cấu hình Ollama Client ({OLLAMA_MODEL_NAME})...")
-    try:
-        client = OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
-        AI_MODELS["ollama_client"] = client
-        try:
-            client.models.list()
-            Logger.success(f"Ollama đã kết nối tại {OLLAMA_BASE_URL}")
-        except Exception:
-            Logger.warning("Không thể kết nối Ollama. Hãy chắc chắn app đang chạy.")
-    except Exception as e:
-        Logger.error("Lỗi cấu hình Ollama", e)
+    # # 2. Config Gemini
+    # if GEMINI_API_KEY and "AIza" in GEMINI_API_KEY:
+    #     try:
+    #         genai.configure(api_key=GEMINI_API_KEY)
+    #         AI_MODELS["gemini_model"] = genai.GenerativeModel(
+    #             model_name='models/gemini-2.5-flash',
+    #             system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
+    #         )
+    #         Logger.success("Gemini API đã sẵn sàng")
+    #     except Exception as e:
+    #         Logger.warning(f"Lỗi cấu hình Gemini: {e}")
+    # else:
+    #     Logger.warning("⚠️ Chưa có GEMINI_API_KEY hợp lệ.")
+    #
+    # # 3. Config Ollama
+    # print(f"\n⏳ Đang cấu hình Ollama Client ({OLLAMA_MODEL_NAME})...")
+    # try:
+    #     client = OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
+    #     AI_MODELS["ollama_client"] = client
+    #     try:
+    #         client.models.list()
+    #         Logger.success(f"Ollama đã kết nối tại {OLLAMA_BASE_URL}")
+    #     except Exception:
+    #         Logger.warning("Không thể kết nối Ollama. Hãy chắc chắn app đang chạy.")
+    # except Exception as e:
+    #     Logger.error("Lỗi cấu hình Ollama", e)
 
 # --- CÁC HÀM XỬ LÝ DỊCH THUẬT (LOGIC CỐT LÕI) ---
 

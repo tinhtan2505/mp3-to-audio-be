@@ -160,12 +160,12 @@ def api_whisper(req: WhisperRequest):
                     if len(last_texts) > 5:  # Giữ queue nhỏ
                         last_texts.pop(0)
 
-                    # Ghi file
+                    # Ghi file với index nối tiếp toàn cục
                     start_ts = format_timestamp(start)
                     end_ts = format_timestamp(end)
                     write_srt_line(
                         current_file_handle,
-                        segments_in_current_file,
+                        total_segments,  # ← Thay đổi: dùng total_segments thay vì segments_in_current_file
                         start_ts,
                         end_ts,
                         text
@@ -195,7 +195,7 @@ def api_whisper(req: WhisperRequest):
 
                         # Mở file mới
                         chunk_index += 1
-                        segments_in_current_file = 0
+                        segments_in_current_file = 0  # ← Reset counter cho file mới
                         stats['files_created'] += 1
 
                         part_suffix = f"_part{chunk_index:02d}"
