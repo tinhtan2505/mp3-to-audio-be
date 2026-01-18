@@ -86,7 +86,7 @@ def api_mix(req: MixRequest):
                 f"x={req.logo_x}+(({req.logo_w}-text_w)/2):y={req.logo_y}+(({req.logo_h}-text_h)/2)[v_branded];"
                 f"[v_branded]drawtext=fontfile='{font_file}':text='{copyright_text}':"
                 f"fontcolor=white:fontsize=28:box=1:boxcolor=black@0.7:boxborderw=5:"
-                f"x=(w-text_w)/2:y=h-80:enable='between(t\\,300\\,305)'[v_final];"
+                f"x=(w-text_w)/2:y=h-80:enable='lt(mod(t\\,300)\\,5)'[v_final];"
             )
             video_map = "[v_final]"
             video_codec = "libx264"
