@@ -1,11 +1,12 @@
 import os
 import time
 import pysrt
+import threading
 from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
 import google.generativeai as genai
 from ai_core import AI_MODELS
-from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE,TRANS_DELAY_SECONDS_GEMINI
+from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE, TRANS_DELAY_SECONDS_GEMINI
 from utils import Logger, get_timestamp_str, normalize_segment_time
 
 router = APIRouter()
@@ -25,8 +26,48 @@ def format_timestamp(seconds):
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-def translate_srt_file(input_srt_path):
-    """Dịch file SRT sang tiếng Việt sử dụng Gemini"""
+
+def call_gemini_api(text_list):
+    """Gửi yêu cầu dịch danh sách dòng tới Gemini."""
+    if not AI_MODELS["gemini_model"]:
+        return None
+
+    prompt_content = "Dịch danh sách các dòng thoại sau (giữ nguyên số lượng dòng):\n"
+    for i, txt in enumerate(text_list):
+        prompt_content += f"Line_{i}: {txt}\n"
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            time.sleep(TRANS_DELAY_SECONDS_GEMINI)
+            response = AI_MODELS["gemini_model"].generate_content(
+                prompt_content,
+                generation_config=genai.types.GenerationConfig(temperature=0.1)
+            )
+            raw_text = response.text.strip()
+            translated_lines = []
+
+            # Phân tích kết quả trả về
+            for line in raw_text.split('\n'):
+                clean_line = line.strip()
+                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
+                    clean_line = clean_line.split(":", 1)[1].strip()
+                elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
+                    clean_line = clean_line.split(' ', 1)[1].strip()
+                if clean_line:
+                    translated_lines.append(clean_line)
+            return translated_lines
+        except Exception as e:
+            print(f"      [Gemini Cảnh báo] Lỗi API (Lần {attempt+1}): {e}")
+            time.sleep(10)
+    return None
+
+
+def translate_srt_file_simple(input_srt_path):
+    """
+    Dịch file SRT sang tiếng Việt - PHIÊN BẢN ĐƠN GIẢN HÓA
+    Không dừng khi lệch dòng, chỉ log cảnh báo và giữ nguyên text gốc
+    """
     translate_start = time.time()
 
     if not AI_MODELS["gemini_model"]:
@@ -54,42 +95,44 @@ def translate_srt_file(input_srt_path):
         print(f"   📦 Kích thước lô: {TRANS_BATCH_SIZE} dòng/lô")
         print(f"   ⏱️  Thời gian bắt đầu: {time.strftime('%H:%M:%S')}\n")
 
+        # Thống kê
+        total_translated = 0
+        total_failed = 0
+        total_mismatched = 0
+
         # Dịch từng batch
         for i in range(0, total_subs, TRANS_BATCH_SIZE):
             batch_start = time.time()
             current_batch = subs[i : i + TRANS_BATCH_SIZE]
+            batch_size = len(current_batch)
 
             print(f"   🔄 Đang dịch lô {(i//TRANS_BATCH_SIZE)+1}/{(total_subs-1)//TRANS_BATCH_SIZE+1} (dòng {i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)})...")
 
-            try:
-                translated_texts = process_batch_recursive(current_batch, i)
+            # Lấy text gốc
+            original_texts = [sub.text for sub in current_batch]
 
-                # Cập nhật văn bản đã dịch
+            # Gọi API dịch
+            translated_texts = call_gemini_api(original_texts)
+
+            # Xử lý kết quả
+            if translated_texts is None:
+                # API thất bại hoàn toàn
+                print(f"      ⚠️  LỖI API: Giữ nguyên {batch_size} dòng gốc")
+                total_failed += batch_size
+            elif len(translated_texts) != batch_size:
+                # Lệch số lượng dòng
+                print(f"      ⚠️  LỆCH DÒNG: Nhận {len(translated_texts)}/{batch_size} dòng - Giữ nguyên text gốc")
+                total_mismatched += batch_size
+            else:
+                # Thành công - cập nhật text
                 for j, new_text in enumerate(translated_texts):
-                    if i + j >= total_subs:
-                        break
-                    sub_item = subs[i+j]
-                    sub_item.text = new_text
+                    if i + j < total_subs:
+                        subs[i + j].text = new_text
+                total_translated += batch_size
+                print(f"      ✓ Hoàn thành: {batch_size} dòng trong {time.time() - batch_start:.2f}s")
 
-                batch_elapsed = time.time() - batch_start
-                print(f"      ✓ Hoàn thành: {len(translated_texts)} dòng trong {batch_elapsed:.2f}s")
-
-                # Lưu tạm sau mỗi batch
-                subs.save(output_path, encoding='utf-8')
-
-            except Exception as e:
-                # Log lỗi chi tiết và dừng quá trình dịch
-                print(f"\n{'='*70}")
-                print(f"❌ LỖI TRONG QUÁ TRÌNH DỊCH")
-                print(f"{'='*70}")
-                print(f"   🔴 Lỗi tại lô {(i//TRANS_BATCH_SIZE)+1}: {str(e)}")
-                print(f"   📊 Đã dịch: {i}/{total_subs} dòng trước khi gặp lỗi")
-                print(f"   ⏱️  Thời gian đã chạy: {time.time() - translate_start:.2f}s")
-                print(f"   ⚠️  Dừng quá trình dịch file này")
-                print(f"{'='*70}\n")
-
-                # Trả về None để báo hiệu dịch thất bại
-                return None
+            # Lưu tạm sau mỗi batch
+            subs.save(output_path, encoding='utf-8')
 
         translate_elapsed = time.time() - translate_start
 
@@ -98,75 +141,41 @@ def translate_srt_file(input_srt_path):
         print(f"{'='*70}")
         print(f"   📝 File đầu ra: {os.path.basename(output_path)}")
         print(f"   📊 Tổng số dòng: {total_subs}")
+        print(f"   ✓ Dịch thành công: {total_translated}")
+        print(f"   ⚠️  Lỗi API: {total_failed}")
+        print(f"   ⚠️  Lệch dòng: {total_mismatched}")
         print(f"   ⏱️  Thời gian dịch: {translate_elapsed:.2f}s ({translate_elapsed/60:.1f} phút)")
-        print(f"   ⚡ Tốc độ: {total_subs/(translate_elapsed/60):.1f} dòng/phút")
+        if total_translated > 0:
+            print(f"   ⚡ Tốc độ: {total_translated/(translate_elapsed/60):.1f} dòng/phút")
         print(f"{'='*70}\n")
 
         return output_path
 
     except Exception as e:
-        # Log lỗi tổng thể (ngoài vòng lặp)
         print(f"\n{'='*70}")
         print(f"❌ LỖI NGHIÊM TRỌNG TRONG QUÁ TRÌNH DỊCH")
         print(f"{'='*70}")
         print(f"   🔴 Lỗi: {str(e)}")
         print(f"   📂 File: {os.path.basename(input_srt_path)}")
-        print(f"   ⚠️  Không thể hoàn thành việc dịch file này")
         print(f"{'='*70}\n")
         return None
 
-def call_gemini_api(text_list):
-    """Gửi yêu cầu dịch danh sách dòng tới Gemini."""
-    if not AI_MODELS["gemini_model"]: return None
 
-    prompt_content = "Dịch danh sách các dòng thoại sau (giữ nguyên số lượng dòng):\n"
-    for i, txt in enumerate(text_list):
-        prompt_content += f"Line_{i}: {txt}\n"
+def translate_file_background(file_path, translated_files_list, lock):
+    """
+    Hàm chạy trong thread riêng để dịch file mà không block Whisper
+    """
+    try:
+        translated_file = translate_srt_file_simple(file_path)
+        if translated_file:
+            with lock:
+                translated_files_list.append(translated_file)
+            print(f"   ✅ [Background] Đã dịch xong: {os.path.basename(translated_file)}\n")
+        else:
+            print(f"   ⚠️  [Background] Dịch thất bại: {os.path.basename(file_path)}\n")
+    except Exception as e:
+        print(f"   ❌ [Background] Lỗi dịch {os.path.basename(file_path)}: {e}\n")
 
-    retries = 3
-    for attempt in range(retries):
-        try:
-            time.sleep(TRANS_DELAY_SECONDS_GEMINI)
-            response = AI_MODELS["gemini_model"].generate_content(
-                prompt_content,
-                generation_config=genai.types.GenerationConfig(temperature=0.1)
-            )
-            raw_text = response.text.strip()
-            translated_lines = []
-
-            # Phân tích kết quả trả về
-            for line in raw_text.split('\n'):
-                clean_line = line.strip()
-                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
-                    clean_line = clean_line.split(":", 1)[1].strip()
-                elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
-                    clean_line = clean_line.split(' ', 1)[1].strip()
-                if clean_line: translated_lines.append(clean_line)
-            return translated_lines
-        except Exception as e:
-            print(f"      [Gemini Cảnh báo] Lỗi API (Lần {attempt+1}): {e}")
-            time.sleep(10)
-    return None
-
-def process_batch_recursive(subs_slice, start_index):
-    """Thuật toán 'Chia để trị' cho Gemini: Nếu batch lỗi, chia đôi để xử lý lại."""
-    original_texts = [sub.text for sub in subs_slice]
-    count = len(original_texts)
-    if count == 0: return []
-
-    translated_results = call_gemini_api(original_texts)
-    if translated_results and len(translated_results) == count:
-        return translated_results
-
-    print(f"  [!!!] PHÁT HIỆN LỆCH DÒNG tại dòng {start_index + 1}. Chia nhỏ để xử lý lại...")
-    if count == 1:
-        print(f"  [Thất bại] Dòng {start_index + 1} AI bó tay. Giữ nguyên gốc.")
-        return [f"[LỖI] {original_texts[0]}"]
-
-    mid = count // 2
-    part1 = process_batch_recursive(subs_slice[:mid], start_index)
-    part2 = process_batch_recursive(subs_slice[mid:], start_index + mid)
-    return part1 + part2
 
 @router.post("/api/v1/dubbing/whisper")
 def api_whisper(req: WhisperRequest):
@@ -191,7 +200,9 @@ def api_whisper(req: WhisperRequest):
             base_filename = os.path.splitext(os.path.basename(path))[0].split('_')[0]
             timestamp_str = get_timestamp_str()
             output_files_list = []
-            translated_files_list = []  # Danh sách file đã dịch
+            translated_files_list = []  # Thread-safe list với lock
+            translation_lock = threading.Lock()
+            translation_threads = []  # Theo dõi các thread đang chạy
 
             # Tracking variables
             total_segments = 0
@@ -338,12 +349,17 @@ def api_whisper(req: WhisperRequest):
                         print(f"      └─ Đường dẫn: {os.path.basename(current_file_path)}")
                         print(f"      └─ Thời gian: {elapsed:.1f}s\n")
 
-                        # === DỊCH FILE VỪA HOÀN THÀNH ===
-                        translated_file = translate_srt_file(current_file_path)
-                        if translated_file:
-                            translated_files_list.append(translated_file)
-                            print(f"   ✅ Đã dịch xong: {os.path.basename(translated_file)}\n")
-                        # === KẾT THÚC DỊCH ===
+                        # === DỊCH FILE TRONG BACKGROUND (KHÔNG BLOCK WHISPER) ===
+                        if AI_MODELS["gemini_model"]:
+                            thread = threading.Thread(
+                                target=translate_file_background,
+                                args=(current_file_path, translated_files_list, translation_lock),
+                                daemon=True
+                            )
+                            thread.start()
+                            translation_threads.append(thread)
+                            print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(current_file_path)}\n")
+                        # === KẾT THÚC KHỞI TẠO DỊCH ===
 
                         # Mở file mới
                         chunk_index += 1
@@ -363,12 +379,17 @@ def api_whisper(req: WhisperRequest):
                     current_file_handle.close()
                     print(f"\n   ✅ File cuối cùng hoàn thành: {segments_in_current_file} câu")
 
-                    # === DỊCH FILE CUỐI CÙNG ===
-                    translated_file = translate_srt_file(current_file_path)
-                    if translated_file:
-                        translated_files_list.append(translated_file)
-                        print(f"   ✅ Đã dịch xong: {os.path.basename(translated_file)}\n")
-                    # === KẾT THÚC DỊCH ===
+                    # === DỊCH FILE CUỐI CÙNG TRONG BACKGROUND ===
+                    if AI_MODELS["gemini_model"]:
+                        thread = threading.Thread(
+                            target=translate_file_background,
+                            args=(current_file_path, translated_files_list, translation_lock),
+                            daemon=True
+                        )
+                        thread.start()
+                        translation_threads.append(thread)
+                        print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(current_file_path)}\n")
+                    # === KẾT THÚC KHỞI TẠO DỊCH ===
 
             except KeyboardInterrupt:
                 print(f"\n\n{'='*70}")
@@ -405,6 +426,16 @@ def api_whisper(req: WhisperRequest):
             elapsed = time.time() - start_w
             stats['avg_segment_length'] = stats['total_chars'] / total_segments if total_segments > 0 else 0
 
+            # Chờ tất cả translation threads hoàn thành (với timeout)
+            print(f"\n{'='*70}")
+            print(f"⏳ Đang chờ các tiến trình dịch hoàn thành...")
+            print(f"{'='*70}\n")
+
+            for i, thread in enumerate(translation_threads, 1):
+                thread.join(timeout=300)  # Timeout 5 phút mỗi thread
+                if thread.is_alive():
+                    print(f"   ⚠️  Thread dịch {i} vẫn đang chạy (timeout)")
+
             # Final report
             print(f"\n{'='*70}")
             print(f"✅ CHUYỂN ÂM THANH THÀNH VĂN BẢN HOÀN TẤT")
@@ -432,8 +463,9 @@ def api_whisper(req: WhisperRequest):
                 print(f"   {i}. {os.path.basename(f)}")
             if translated_files_list:
                 print(f"\n   === File đã dịch (Tiếng Việt) ===")
-                for i, f in enumerate(translated_files_list, 1):
-                    print(f"   {i}. {os.path.basename(f)}")
+                with translation_lock:
+                    for i, f in enumerate(translated_files_list, 1):
+                        print(f"   {i}. {os.path.basename(f)}")
             print(f"{'='*70}\n")
 
             Logger.success(f"Whisper hoàn tất: {len(output_files_list)} files, {total_segments} câu", elapsed)
