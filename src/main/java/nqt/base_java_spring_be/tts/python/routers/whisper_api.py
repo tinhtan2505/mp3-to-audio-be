@@ -3,8 +3,9 @@ import time
 import pysrt
 from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
-from ai_core import AI_MODELS, process_batch_recursive
-from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE
+import google.generativeai as genai
+from ai_core import AI_MODELS
+from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE,TRANS_DELAY_SECONDS_GEMINI
 from utils import Logger, get_timestamp_str, normalize_segment_time
 
 router = APIRouter()
@@ -114,6 +115,58 @@ def translate_srt_file(input_srt_path):
         print(f"{'='*70}\n")
         return None
 
+def call_gemini_api(text_list):
+    """Gửi yêu cầu dịch danh sách dòng tới Gemini."""
+    if not AI_MODELS["gemini_model"]: return None
+
+    prompt_content = "Dịch danh sách các dòng thoại sau (giữ nguyên số lượng dòng):\n"
+    for i, txt in enumerate(text_list):
+        prompt_content += f"Line_{i}: {txt}\n"
+
+    retries = 3
+    for attempt in range(retries):
+        try:
+            time.sleep(TRANS_DELAY_SECONDS_GEMINI)
+            response = AI_MODELS["gemini_model"].generate_content(
+                prompt_content,
+                generation_config=genai.types.GenerationConfig(temperature=0.1)
+            )
+            raw_text = response.text.strip()
+            translated_lines = []
+
+            # Phân tích kết quả trả về
+            for line in raw_text.split('\n'):
+                clean_line = line.strip()
+                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
+                    clean_line = clean_line.split(":", 1)[1].strip()
+                elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
+                    clean_line = clean_line.split(' ', 1)[1].strip()
+                if clean_line: translated_lines.append(clean_line)
+            return translated_lines
+        except Exception as e:
+            print(f"      [Gemini Cảnh báo] Lỗi API (Lần {attempt+1}): {e}")
+            time.sleep(10)
+    return None
+
+def process_batch_recursive(subs_slice, start_index):
+    """Thuật toán 'Chia để trị' cho Gemini: Nếu batch lỗi, chia đôi để xử lý lại."""
+    original_texts = [sub.text for sub in subs_slice]
+    count = len(original_texts)
+    if count == 0: return []
+
+    translated_results = call_gemini_api(original_texts)
+    if translated_results and len(translated_results) == count:
+        return translated_results
+
+    print(f"  [!!!] PHÁT HIỆN LỆCH DÒNG tại dòng {start_index + 1}. Chia nhỏ để xử lý lại...")
+    if count == 1:
+        print(f"  [Thất bại] Dòng {start_index + 1} AI bó tay. Giữ nguyên gốc.")
+        return [f"[LỖI] {original_texts[0]}"]
+
+    mid = count // 2
+    part1 = process_batch_recursive(subs_slice[:mid], start_index)
+    part2 = process_batch_recursive(subs_slice[mid:], start_index + mid)
+    return part1 + part2
 
 @router.post("/api/v1/dubbing/whisper")
 def api_whisper(req: WhisperRequest):
