@@ -24,7 +24,6 @@ def format_timestamp(seconds):
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-
 def translate_srt_file(input_srt_path):
     """Dịch file SRT sang tiếng Việt sử dụng Gemini"""
     translate_start = time.time()
@@ -41,7 +40,7 @@ def translate_srt_file(input_srt_path):
 
         # Tạo tên file đầu ra
         dir_name, base_name = os.path.split(input_srt_path)
-        output_path = os.path.join(dir_name, f"{os.path.splitext(base_name)[0]}_vi_TienHiep.srt")
+        output_path = os.path.join(dir_name, f"{os.path.splitext(base_name)[0]}_vi.srt")
 
         # Đọc file SRT
         try:
@@ -78,9 +77,18 @@ def translate_srt_file(input_srt_path):
                 subs.save(output_path, encoding='utf-8')
 
             except Exception as e:
-                print(f"      ✗ Lỗi lô {(i//TRANS_BATCH_SIZE)+1}: {str(e)}")
-                # Tiếp tục với batch tiếp theo thay vì dừng
-                continue
+                # Log lỗi chi tiết và dừng quá trình dịch
+                print(f"\n{'='*70}")
+                print(f"❌ LỖI TRONG QUÁ TRÌNH DỊCH")
+                print(f"{'='*70}")
+                print(f"   🔴 Lỗi tại lô {(i//TRANS_BATCH_SIZE)+1}: {str(e)}")
+                print(f"   📊 Đã dịch: {i}/{total_subs} dòng trước khi gặp lỗi")
+                print(f"   ⏱️  Thời gian đã chạy: {time.time() - translate_start:.2f}s")
+                print(f"   ⚠️  Dừng quá trình dịch file này")
+                print(f"{'='*70}\n")
+
+                # Trả về None để báo hiệu dịch thất bại
+                return None
 
         translate_elapsed = time.time() - translate_start
 
@@ -96,7 +104,14 @@ def translate_srt_file(input_srt_path):
         return output_path
 
     except Exception as e:
-        print(f"\n❌ LỖI DỊCH: {str(e)}")
+        # Log lỗi tổng thể (ngoài vòng lặp)
+        print(f"\n{'='*70}")
+        print(f"❌ LỖI NGHIÊM TRỌNG TRONG QUÁ TRÌNH DỊCH")
+        print(f"{'='*70}")
+        print(f"   🔴 Lỗi: {str(e)}")
+        print(f"   📂 File: {os.path.basename(input_srt_path)}")
+        print(f"   ⚠️  Không thể hoàn thành việc dịch file này")
+        print(f"{'='*70}\n")
         return None
 
 
