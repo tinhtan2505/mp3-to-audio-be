@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import os
 import time
 import subprocess
@@ -57,43 +56,43 @@ def api_mix(req: MixRequest):
         video_codec = "copy"
 
         if req.remove_logo:
-            import random
-            print("   🛡️  Chèn Thương hiệu & Bản quyền: BẬT")
-            brand = req.branding_text
+            print("   🛡️  Xóa Logo: BẬT")
 
-            # Tìm font
-            font_file = "Arial"
-            for f in os.listdir(video_dir):
-                if f.lower().endswith(('.ttf', '.otf')):
-                    font_file = Path(video_dir).joinpath(f).as_posix().replace(":", "\\:")
-                    break
+            brand_img_path = req.branding_image_path
+            has_branding = brand_img_path and os.path.exists(brand_img_path)
 
-            # Random tỷ lệ scale nhỏ (từ 1.001 đến 1.005)
-            random.seed(int(time.time() * 1000))
-            scale_w = round(1 + random.uniform(0.001, 0.005), 4)
-            scale_h = round(1 + random.uniform(0.001, 0.005), 4)
-            print(f"   🎲 Random scale: {scale_w}x{scale_h}")
+            if has_branding:
+                print("   ✅ Chèn Ảnh Thương hiệu: BẬT")
+                brand_img_index = int(len(inputs) / 2)
+                inputs.extend(["-i", brand_img_path])
 
-            # Escape text để tránh lỗi với ký tự đặc biệt
-            brand_escaped = brand.replace(":", "\\:").replace("'", "\\'")
-            copyright_text = "Ban quyen NQT DRAMA REVIEW"
+                delogo_cmd = f"[0:v]delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}[v_cl];"
 
-            # Scale và làm tròn về số chẵn (chia hết cho 2)
-            video_filter = (
-                f"[0:v]scale=iw*{scale_w}:ih*{scale_h},scale='trunc(iw/2)*2':'trunc(ih/2)*2',setsar=1[v_scaled];"
-                f"[v_scaled]drawtext=fontfile='{font_file}':text='{brand_escaped}':"
-                f"fontcolor=white:fontsize=24:box=1:boxcolor=black@0.6:boxborderw=5:"
-                f"x={req.logo_x}+(({req.logo_w}-text_w)/2):y={req.logo_y}+(({req.logo_h}-text_h)/2)[v_branded];"
-                f"[v_branded]drawtext=fontfile='{font_file}':text='{copyright_text}':"
-                f"fontcolor=white:fontsize=28:box=1:boxcolor=black@0.7:boxborderw=5:"
-                f"x=(w-text_w)/2:y=h-80:enable='lt(mod(t\\,300)\\,5)'[v_final];"
-            )
-            video_map = "[v_final]"
+                prepare_img_cmd = (
+                    f"[{brand_img_index}:v]"
+                    f"scale=150:100[v_img_scaled];"
+                )
+
+                overlay_cmd = (
+                    f"[v_cl][v_img_scaled]overlay="
+                    f"x=0:y=0"
+                    f"[v_branded];"
+                )
+
+                video_filter = delogo_cmd + prepare_img_cmd + overlay_cmd
+                video_map = "[v_branded]"
+            else:
+                print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT (Không có đường dẫn ảnh hoặc file không tồn tại)")
+
+                delogo_cmd = f"[0:v]delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}[v_cl]"
+
+                video_filter = delogo_cmd
+                video_map = "[v_cl]"
+
             video_codec = "libx264"
 
         # Tổng hợp lệnh
         full_filter = (video_filter + audio_filter) if video_filter else audio_filter
-
         cmd = ["ffmpeg", "-y"] + inputs + [
             "-filter_complex", full_filter,
             "-map", video_map, "-map", "[a_out]",
@@ -111,7 +110,7 @@ def api_mix(req: MixRequest):
 
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
-        print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-15:]))
+        print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-10:]))
         raise HTTPException(500, "Lỗi khi chạy FFmpeg")
     except Exception as e:
         Logger.error("Lỗi hệ thống", e)

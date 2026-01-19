@@ -1,5 +1,6 @@
 # schemas.py
 from pydantic import BaseModel
+from typing import Optional
 
 class WhisperRequest(BaseModel):
     input_path: str
@@ -26,3 +27,4 @@ class MixRequest(BaseModel):
     logo_w: int = 250
     logo_h: int = 40
     branding_text: str = "NQT DRAMA REVIEW"
+    branding_image_path: Optional[str] = "D:/Dubbing/logo.png"
