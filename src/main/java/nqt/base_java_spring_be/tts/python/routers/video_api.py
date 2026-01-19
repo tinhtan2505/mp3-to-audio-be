@@ -1,5 +1,6 @@
 import os
 import time
+import random
 import subprocess
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
@@ -28,85 +29,153 @@ def api_mix(req: MixRequest):
         video_dir = os.path.dirname(vid)
         out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
 
-        # Cấu hình Audio Filter
-        audio_filter = ""
+        # Random giảm kích thước để tránh phát hiện bản quyền
+        # Giảm ngẫu nhiên chiều rộng HOẶC chiều cao từ 1-5px
+        reduce_dimension = random.choice(['width', 'height'])
+        reduce_pixels = random.randint(1, 5)
+        print(f"   🎲 Random Resize: Giảm {reduce_dimension} đi {reduce_pixels}px")
+
+        # Cấu hình inputs
         inputs = []
 
-        if has_music:
-            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền)")
-            duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
-            inputs = ["-i", vid, "-i", inst, "-i", voice]
-            # Input 0:Video, 1:Music, 2:Voice
-            audio_filter = (
-                f"[2:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[voice];"
-                f"[voice]asplit[v_trig][v_mix];"
-                f"[1:a]volume={m_vol}[bg];"
-                f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck];"
-                f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]"
-            )
-        else:
-            print(f"   🎚️  Chế độ: VOICE ONLY (Chỉ giọng đọc)")
-            inputs = ["-i", vid, "-i", voice]
-            # Input 0:Video, 1:Voice
-            audio_filter = f"[1:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[a_out]"
+        # Xây dựng filter_complex
+        filters = []
 
-        # Cấu hình Video Filter (Logo)
-        video_filter = ""
-        video_map = "0:v"
-        video_codec = "copy"
+        # PHẦN 1: XỬ LÝ VIDEO
+        # Lấy kích thước video gốc
+        try:
+            probe_size = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=width,height", "-of", "csv=p=0", vid],
+                capture_output=True, text=True, check=True
+            )
+            orig_w, orig_h = map(int, probe_size.stdout.strip().split(','))
+
+            # Giảm chiều rộng hoặc chiều cao
+            if reduce_dimension == 'width':
+                new_w = orig_w - reduce_pixels
+                new_h = orig_h
+            else:  # height
+                new_w = orig_w
+                new_h = orig_h - reduce_pixels
+
+            # Đảm bảo chẵn (yêu cầu của x264)
+            new_w = new_w if new_w % 2 == 0 else new_w - 1
+            new_h = new_h if new_h % 2 == 0 else new_h - 1
+
+            print(f"   📐 Kích thước: {orig_w}x{orig_h} → {new_w}x{new_h}")
+            video_chain = f"[0:v]scale={new_w}:{new_h}"
+        except Exception as e:
+            print(f"   ⚠️  Không lấy được kích thước video: {e}")
+            # Fallback: giảm trực tiếp bằng expression
+            if reduce_dimension == 'width':
+                video_chain = f"[0:v]scale=iw-{reduce_pixels}:ih"
+            else:
+                video_chain = f"[0:v]scale=iw:ih-{reduce_pixels}"
 
         if req.remove_logo:
             print("   🛡️  Xóa Logo: BẬT")
+            video_chain += f",delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}"
 
             brand_img_path = req.branding_image_path
             has_branding = brand_img_path and os.path.exists(brand_img_path)
 
             if has_branding:
                 print("   ✅ Chèn Ảnh Thương hiệu: BẬT")
-                brand_img_index = int(len(inputs) / 2)
-                inputs.extend(["-i", brand_img_path])
+                video_chain += "[v_delogo]"
+                filters.append(video_chain)
 
-                delogo_cmd = f"[0:v]delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}[v_cl];"
+                # Thêm branding image vào inputs
+                inputs = ["-i", vid]
+                if has_music:
+                    inputs.extend(["-i", inst, "-i", voice, "-i", brand_img_path])
+                    brand_idx = 3
+                else:
+                    inputs.extend(["-i", voice, "-i", brand_img_path])
+                    brand_idx = 2
 
-                prepare_img_cmd = (
-                    f"[{brand_img_index}:v]"
-                    f"scale=150:100[v_img_scaled];"
-                )
-
-                overlay_cmd = (
-                    f"[v_cl][v_img_scaled]overlay="
-                    f"x=0:y=0"
-                    f"[v_branded];"
-                )
-
-                video_filter = delogo_cmd + prepare_img_cmd + overlay_cmd
-                video_map = "[v_branded]"
+                # Scale branding image và overlay
+                filters.append(f"[{brand_idx}:v]scale=150:100[v_brand]")
+                filters.append(f"[v_delogo][v_brand]overlay=x=0:y=0[v_out]")
+                video_map = "[v_out]"
             else:
-                print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT (Không có đường dẫn ảnh hoặc file không tồn tại)")
+                print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")
+                video_chain += "[v_out]"
+                filters.append(video_chain)
+                video_map = "[v_out]"
 
-                delogo_cmd = f"[0:v]delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}[v_cl]"
+                # Setup inputs thông thường
+                inputs = ["-i", vid]
+                if has_music:
+                    inputs.extend(["-i", inst, "-i", voice])
+                else:
+                    inputs.extend(["-i", voice])
+        else:
+            # Không xóa logo, chỉ scale
+            video_chain += "[v_out]"
+            filters.append(video_chain)
+            video_map = "[v_out]"
 
-                video_filter = delogo_cmd
-                video_map = "[v_cl]"
+            # Setup inputs thông thường
+            inputs = ["-i", vid]
+            if has_music:
+                inputs.extend(["-i", inst, "-i", voice])
+            else:
+                inputs.extend(["-i", voice])
 
-            video_codec = "libx264"
+        # PHẦN 2: XỬ LÝ AUDIO
+        if has_music:
+            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền)")
+            duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
+            voice_idx = 2
+            music_idx = 1
 
-        # Tổng hợp lệnh
-        full_filter = (video_filter + audio_filter) if video_filter else audio_filter
+            filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[voice]")
+            filters.append(f"[voice]asplit[v_trig][v_mix]")
+            filters.append(f"[{music_idx}:a]volume={m_vol}[bg]")
+            filters.append(f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck]")
+            filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
+        else:
+            print(f"   🎚️  Chế độ: VOICE ONLY (Chỉ giọng đọc)")
+            voice_idx = 1
+            filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[a_out]")
+
+        # Ghép tất cả filters
+        filter_complex = ";".join(filters)
+
+        # Tạo lệnh FFmpeg
         cmd = ["ffmpeg", "-y"] + inputs + [
-            "-filter_complex", full_filter,
+            "-filter_complex", filter_complex,
             "-map", video_map, "-map", "[a_out]",
-            "-c:v", video_codec, "-c:a", "aac", "-b:a", "192k"
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            out_file
         ]
-        if video_codec == "libx264": cmd.extend(["-preset", "medium", "-crf", "23"])
-        cmd.append(out_file)
 
         print("   ⏳ Đang render FFmpeg...")
-        subprocess.run(cmd, check=True, stderr=subprocess.PIPE)
+        print(f"   🔧 Filter: {filter_complex}")
+
+        # Kiểm tra file input trước khi render
+        print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
+        print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
+        if has_music:
+            print(f"   🎵 Music: {inst} ({os.path.getsize(inst)} bytes)")
+
+        # Chạy FFmpeg với output đầy đủ để debug
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            print("\n❌ FFMPEG STDERR:")
+            print(result.stderr)
+            raise subprocess.CalledProcessError(result.returncode, cmd, output=result.stdout, stderr=result.stderr)
 
         Logger.success("XỬ LÝ THÀNH CÔNG!", time.time() - start_time)
         print(f"   👉 File đích: {out_file}")
-        return {"status": "success", "output_file": out_file}
+        return {
+            "status": "success",
+            "output_file": out_file,
+            "resize_info": f"Giảm {reduce_dimension} đi {reduce_pixels}px"
+        }
 
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr.decode('utf-8', errors='ignore') if e.stderr else str(e)
