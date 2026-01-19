@@ -28,7 +28,7 @@ def format_timestamp(seconds):
 
 
 def call_gemini_api(text_list):
-    """Gửi yêu cầu dịch danh sách dòng tới Gemini."""
+    """Gửi yêu cầu dịch danh sách dòng tới Gemini (không retry khi lỗi)."""
     if not AI_MODELS["gemini_model"]:
         return None
 
@@ -36,32 +36,28 @@ def call_gemini_api(text_list):
     for i, txt in enumerate(text_list):
         prompt_content += f"Line_{i}: {txt}\n"
 
-    retries = 3
-    for attempt in range(retries):
-        try:
-            time.sleep(TRANS_DELAY_SECONDS_GEMINI)
-            response = AI_MODELS["gemini_model"].generate_content(
-                prompt_content,
-                generation_config=genai.types.GenerationConfig(temperature=0.1)
-            )
-            raw_text = response.text.strip()
-            translated_lines = []
+    try:
+        time.sleep(TRANS_DELAY_SECONDS_GEMINI)
+        response = AI_MODELS["gemini_model"].generate_content(
+            prompt_content,
+            generation_config=genai.types.GenerationConfig(temperature=0.1)
+        )
+        raw_text = response.text.strip()
+        translated_lines = []
 
-            # Phân tích kết quả trả về
-            for line in raw_text.split('\n'):
-                clean_line = line.strip()
-                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
-                    clean_line = clean_line.split(":", 1)[1].strip()
-                elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
-                    clean_line = clean_line.split(' ', 1)[1].strip()
-                if clean_line:
-                    translated_lines.append(clean_line)
-            return translated_lines
-        except Exception as e:
-            print(f"      [Gemini Cảnh báo] Lỗi API (Lần {attempt+1}): {e}")
-            time.sleep(10)
-    return None
-
+        # Phân tích kết quả trả về
+        for line in raw_text.split('\n'):
+            clean_line = line.strip()
+            if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
+                clean_line = clean_line.split(":", 1)[1].strip()
+            elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
+                clean_line = clean_line.split(' ', 1)[1].strip()
+            if clean_line:
+                translated_lines.append(clean_line)
+        return translated_lines
+    except Exception as e:
+        print(f"      [Gemini Lỗi] API thất bại: {e}")
+        return None
 
 def translate_srt_file_simple(input_srt_path):
     """
@@ -99,6 +95,7 @@ def translate_srt_file_simple(input_srt_path):
         total_translated = 0
         total_failed = 0
         total_mismatched = 0
+        has_errors = False
 
         # Dịch từng batch
         for i in range(0, total_subs, TRANS_BATCH_SIZE):
@@ -119,10 +116,12 @@ def translate_srt_file_simple(input_srt_path):
                 # API thất bại hoàn toàn
                 print(f"      ⚠️  LỖI API: Giữ nguyên {batch_size} dòng gốc")
                 total_failed += batch_size
+                has_errors = True
             elif len(translated_texts) != batch_size:
                 # Lệch số lượng dòng
                 print(f"      ⚠️  LỆCH DÒNG: Nhận {len(translated_texts)}/{batch_size} dòng - Giữ nguyên text gốc")
                 total_mismatched += batch_size
+                has_errors = True
             else:
                 # Thành công - cập nhật text
                 for j, new_text in enumerate(translated_texts):
@@ -134,6 +133,12 @@ def translate_srt_file_simple(input_srt_path):
             # Lưu tạm sau mỗi batch
             subs.save(output_path, encoding='utf-8')
 
+        # Đổi tên file nếu có lỗi
+        if has_errors:
+            error_path = output_path.replace('.srt', '_[ERROR].srt')
+            os.rename(output_path, error_path)
+            output_path = error_path
+            
         translate_elapsed = time.time() - translate_start
 
         print(f"\n{'='*70}")
