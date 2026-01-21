@@ -24,9 +24,203 @@ def get_video_duration(video_path):
         print(f"   ⚠️  Không lấy được thời lượng video: {e}")
         return None
 
+def auto_detect_text_regions(video_path, sample_time=5, num_samples=5):
+    """
+    Tự động phát hiện vùng text/subtitle trong video bằng OCR
+    Sample nhiều frames để tăng độ chính xác
+
+    Args:
+        video_path: Đường dẫn video
+        sample_time: Thời điểm bắt đầu sample (giây)
+        num_samples: Số lượng frames cần sample (mặc định 5)
+
+    Returns:
+        List các vùng [(x, y, w, h), ...]
+    """
+    try:
+        import cv2
+        import numpy as np
+        import tempfile
+        try:
+            import pytesseract
+            # Hardcode path for Windows if tesseract not in PATH
+            import platform
+            if platform.system() == 'Windows':
+                possible_paths = [
+                    r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+                    r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+                    r'C:\Users\tjnkt\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+                ]
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        pytesseract.pytesseract.tesseract_cmd = path
+                        print(f"   🔧 Tesseract tìm thấy tại: {path}")
+                        break
+        except ImportError:
+            print("   ⚠️  Cần cài pytesseract: pip install pytesseract")
+            return []
+
+        # Lấy thời lượng video
+        duration = get_video_duration(video_path)
+        if not duration:
+            duration = 60  # Fallback
+
+        # Tính các thời điểm sample đều nhau
+        if duration <= 60:
+            # Video ngắn: sample 3 frames
+            sample_times = [duration * 0.3, duration * 0.5, duration * 0.7]
+        else:
+            # Video dài: sample nhiều frames hơn (đầu, giữa, cuối)
+            sample_times = [
+                duration * 0.1,   # 10% đầu
+                duration * 0.3,   # 30%
+                duration * 0.5,   # 50% giữa
+                duration * 0.7,   # 70%
+                duration * 0.9    # 90% cuối
+            ]
+
+        print(f"   🔍 Đang phân tích {len(sample_times)} frames từ video {duration:.0f}s...")
+        print(f"   📍 Thời điểm sample: {[f'{t:.1f}s' for t in sample_times]}")
+
+        all_detected_regions = []
+
+        # Sample từng frame
+        for frame_idx, sample_t in enumerate(sample_times):
+            print(f"\n   🎬 Frame {frame_idx+1}/{len(sample_times)} tại {sample_t:.1f}s")
+
+            # Tạo temp file cross-platform
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                temp_frame = tmp.name
+
+            try:
+                # Trích xuất 1 frame từ video
+                cmd = [
+                    "ffmpeg", "-y", "-ss", str(sample_t), "-i", video_path,
+                    "-vframes", "1", "-q:v", "2", temp_frame
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+
+                if result.returncode != 0:
+                    print(f"   ⚠️  FFmpeg error frame {frame_idx+1}")
+                    continue
+
+                # Đọc frame
+                frame = cv2.imread(temp_frame)
+                if frame is None:
+                    print(f"   ⚠️  Không đọc được frame {frame_idx+1}")
+                    continue
+
+                height, width = frame.shape[:2]
+                if frame_idx == 0:
+                    print(f"   📐 Kích thước frame: {width}x{height}")
+
+                # Chuyển sang grayscale và tăng contrast
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+                # Threshold để tách text
+                _, thresh1 = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+                _, thresh2 = cv2.threshold(gray, 50, 255, cv2.THRESH_BINARY_INV)
+
+                frame_regions = []
+
+                # Phát hiện text trên cả 2 threshold
+                for thresh_img in [thresh1, thresh2]:
+                    try:
+                        data = pytesseract.image_to_data(
+                            thresh_img,
+                            lang='chi_sim+chi_tra+eng',
+                            output_type=pytesseract.Output.DICT
+                        )
+                    except:
+                        # Fallback to English only
+                        data = pytesseract.image_to_data(
+                            thresh_img,
+                            output_type=pytesseract.Output.DICT
+                        )
+
+                    n_boxes = len(data['text'])
+                    for i in range(n_boxes):
+                        # Chỉ lấy box có confidence > 30 và có text
+                        if int(data['conf'][i]) > 30 and data['text'][i].strip():
+                            x, y, w, h = data['left'][i], data['top'][i], data['width'][i], data['height'][i]
+
+                            # Mở rộng box thêm 20% để cover hết text
+                            padding = 0.2
+                            x = max(0, int(x - w * padding))
+                            y = max(0, int(y - h * padding))
+                            w = int(w * (1 + 2 * padding))
+                            h = int(h * (1 + 2 * padding))
+
+                            frame_regions.append({
+                                'x': x, 'y': y, 'w': w, 'h': h,
+                                'text': data['text'][i],
+                                'conf': data['conf'][i],
+                                'frame_idx': frame_idx
+                            })
+
+                print(f"   📊 Phát hiện {len(frame_regions)} text boxes")
+                all_detected_regions.extend(frame_regions)
+
+            finally:
+                # Cleanup temp file
+                if os.path.exists(temp_frame):
+                    os.remove(temp_frame)
+
+        # Loại bỏ các region trùng lặp GIỮA CÁC FRAMES
+        if all_detected_regions:
+            print(f"\n   🔄 Tổng {len(all_detected_regions)} regions từ tất cả frames")
+            print(f"   🔄 Đang merge regions trùng lặp...")
+
+            # Merge các box gần nhau
+            merged = []
+            sorted_regions = sorted(all_detected_regions, key=lambda r: (r['y'], r['x']))
+
+            for region in sorted_regions:
+                # Kiểm tra xem có merge được với box nào đã có không
+                merged_flag = False
+                for m in merged:
+                    # Nếu 2 box overlap > 50%
+                    x_overlap = max(0, min(m['x'] + m['w'], region['x'] + region['w']) - max(m['x'], region['x']))
+                    y_overlap = max(0, min(m['y'] + m['h'], region['y'] + region['h']) - max(m['y'], region['y']))
+                    overlap_area = x_overlap * y_overlap
+
+                    if overlap_area > 0.5 * min(m['w'] * m['h'], region['w'] * region['h']):
+                        # Merge: lấy bounding box bao cả 2
+                        m['x'] = min(m['x'], region['x'])
+                        m['y'] = min(m['y'], region['y'])
+                        m['w'] = max(m['x'] + m['w'], region['x'] + region['w']) - m['x']
+                        m['h'] = max(m['y'] + m['h'], region['y'] + region['h']) - m['y']
+                        # Giữ confidence cao nhất
+                        m['conf'] = max(m['conf'], region['conf'])
+                        merged_flag = True
+                        break
+
+                if not merged_flag:
+                    merged.append(region)
+
+            print(f"   ✅ Sau khi merge: {len(merged)} vùng text duy nhất:")
+            for idx, r in enumerate(merged):
+                print(f"      Region {idx+1}: ({r['x']}, {r['y']}) {r['w']}x{r['h']} - '{r['text'][:20]}' (conf: {r['conf']})")
+
+            return merged
+
+        print("   ⚠️  Không phát hiện text nào trong tất cả frames")
+        return []
+
+    except ImportError:
+        print("   ⚠️  Cần cài: pip install opencv-python pytesseract")
+        print("   ⚠️  MacOS: brew install tesseract")
+        print("   ⚠️  Ubuntu: sudo apt-get install tesseract-ocr")
+        print("   ⚠️  Windows: Download từ https://github.com/UB-Mannheim/tesseract/wiki")
+        return []
+    except Exception as e:
+        print(f"   ⚠️  Lỗi khi phát hiện text: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
 def parse_ffmpeg_progress(line, total_duration):
     """Parse output của FFmpeg để lấy tiến độ"""
-    # FFmpeg output format: time=00:01:23.45
     time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', line)
     if time_match and total_duration:
         hours, minutes, seconds = map(float, time_match.groups())
@@ -35,11 +229,11 @@ def parse_ffmpeg_progress(line, total_duration):
         return current_time, min(progress, 100)
     return None, None
 
-# --- 5.5. API MIX VIDEO (GHÉP PHIM) ---
+# --- 5.5. API MIX VIDEO (GHÉP PHIM) - ENHANCED ANTI-COPYRIGHT ---
 @router.post("/api/v1/dubbing/mix-video")
 def api_mix(req: MixRequest):
     start_time = time.time()
-    Logger.section("GHÉP VIDEO (FFMPEG)")
+    Logger.section("GHÉP VIDEO (FFMPEG) - ANTI-COPYRIGHT MODE")
 
     try:
         vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
@@ -60,16 +254,40 @@ def api_mix(req: MixRequest):
         if total_duration:
             print(f"   ⏱️  Thời lượng video: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
 
-        # Random giảm kích thước để tránh phát hiện bản quyền
+        # ==================== ANTI-COPYRIGHT PARAMETERS ====================
+
+        # 1. PICTURE-IN-PIP PARAMETERS (Quan trọng nhất!)
+        pip_scale = random.uniform(0.82, 0.88)  # Thu nhỏ video 82-88%
+        blur_strength = random.randint(15, 25)  # Độ mờ nền
+        pip_padding = random.randint(40, 80)    # Khoảng cách viền
+
+        # 2. COLOR GRADING PARAMETERS
+        saturation = random.uniform(1.15, 1.35)     # Tăng độ bão hòa 15-35%
+        contrast = random.uniform(1.08, 1.18)       # Tăng độ tương phản 8-18%
+        brightness = random.uniform(0.02, 0.08)     # Tăng độ sáng 2-8%
+        gamma = random.uniform(0.95, 1.05)          # Điều chỉnh gamma
+
+        # 3. AUDIO TRANSFORMATION PARAMETERS (CHỈ CHO NHẠC NỀN)
+        music_pitch = random.uniform(-0.4, 0.4)     # Pitch shift music
+        music_highpass = random.randint(60, 100)    # High-pass filter cho music
+        music_lowpass = random.randint(15000, 18000) # Low-pass filter cho music
+
+        # 4. RANDOM RESIZE (bổ sung)
         reduce_dimension = random.choice(['width', 'height'])
-        reduce_pixels = random.randint(1, 5)
+        reduce_pixels = random.randint(2, 6)
+
+        print("   🛡️  ======= CHẾ ĐỘ CHỐNG BẢN QUYỀN ======")
+        print(f"   📺 PiP Scale: {pip_scale:.2%} | Blur: {blur_strength}px | Padding: {pip_padding}px")
+        print(f"   🎨 Color: Sat={saturation:.2f} | Con={contrast:.2f} | Bri=+{brightness:.2f} | Gamma={gamma:.2f}")
+        print(f"   🎵 Audio Transform (CHỈ NHẠC NỀN): Pitch={music_pitch:+.2f}st | HP={music_highpass}Hz | LP={music_lowpass}Hz")
+        print(f"   🎤 Voice: GIỮ NGUYÊN (không transform)")
         print(f"   🎲 Random Resize: Giảm {reduce_dimension} đi {reduce_pixels}px")
 
         # Cấu hình inputs
         inputs = []
         filters = []
 
-        # PHẦN 1: XỬ LÝ VIDEO
+        # ==================== PHẦN 1: XỬ LÝ VIDEO ====================
         try:
             probe_size = subprocess.run(
                 ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -78,6 +296,7 @@ def api_mix(req: MixRequest):
             )
             orig_w, orig_h = map(int, probe_size.stdout.strip().split(','))
 
+            # Tính toán kích thước sau khi resize
             if reduce_dimension == 'width':
                 new_w = orig_w - reduce_pixels
                 new_h = orig_h
@@ -88,26 +307,138 @@ def api_mix(req: MixRequest):
             new_w = new_w if new_w % 2 == 0 else new_w - 1
             new_h = new_h if new_h % 2 == 0 else new_h - 1
 
+            # Tính toán kích thước PiP
+            pip_w = int(new_w * pip_scale)
+            pip_h = int(new_h * pip_scale)
+            pip_w = pip_w if pip_w % 2 == 0 else pip_w - 1
+            pip_h = pip_h if pip_h % 2 == 0 else pip_h - 1
+
+            # Vị trí PiP (centered)
+            pip_x = (new_w - pip_w) // 2
+            pip_y = (new_h - pip_h) // 2
+
             print(f"   📐 Kích thước: {orig_w}x{orig_h} → {new_w}x{new_h}")
-            video_chain = f"[0:v]scale={new_w}:{new_h}"
+            print(f"   📐 PiP: {pip_w}x{pip_h} tại vị trí ({pip_x}, {pip_y})")
+
+            # FILTER CHAIN:
+            # 1. Scale + Color Grading cho video chính (PiP)
+            video_chain = (
+                f"[0:v]scale={new_w}:{new_h},"
+                f"eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
+                f"[v_colored]"
+            )
+            filters.append(video_chain)
+
+            # 2. Tạo nền mờ từ video gốc
+            bg_chain = (
+                f"[v_colored]scale={new_w}:{new_h},"
+                f"gblur=sigma={blur_strength},"
+                f"eq=brightness=-0.1:contrast=0.8"  # Làm tối nền một chút
+                f"[v_bg_blur]"
+            )
+            filters.append(bg_chain)
+
+            # 3. Scale video PiP
+            pip_chain = f"[v_colored]scale={pip_w}:{pip_h}[v_pip]"
+            filters.append(pip_chain)
+
+            # 4. Overlay PiP lên nền mờ
+            overlay_base = f"[v_bg_blur][v_pip]overlay={pip_x}:{pip_y}"
+
         except Exception as e:
             print(f"   ⚠️  Không lấy được kích thước video: {e}")
-            if reduce_dimension == 'width':
-                video_chain = f"[0:v]scale=iw-{reduce_pixels}:ih"
-            else:
-                video_chain = f"[0:v]scale=iw:ih-{reduce_pixels}"
+            # Fallback với scale động
+            video_chain = (
+                f"[0:v]scale=iw-{reduce_pixels}:ih,"
+                f"eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
+                f"[v_colored]"
+            )
+            filters.append(video_chain)
 
+            bg_chain = f"[v_colored]gblur=sigma={blur_strength}[v_bg_blur]"
+            filters.append(bg_chain)
+
+            pip_chain = f"[v_colored]scale=iw*{pip_scale}:ih*{pip_scale}[v_pip]"
+            filters.append(pip_chain)
+
+            overlay_base = f"[v_bg_blur][v_pip]overlay=(W-w)/2:(H-h)/2"
+
+        # ==================== XỬ LÝ LOGO & BRANDING (FULL WIDTH VERSION!) ====================
         if req.remove_logo:
-            print("   🛡️  Xóa Logo: BẬT")
-            video_chain += f",delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}"
+            print("   🛡️  Xóa Logo/Text: BẬT (FULL WIDTH MODE - CHỈ VÙI DƯỚI 2/3)")
 
+            # TỰ ĐỘNG PHÁT HIỆN TEXT REGIONS
+            text_regions = []
+            print("   🔍 Tự động phát hiện text...")
+            detected = auto_detect_text_regions(vid, sample_time=total_duration/2 if total_duration else 5)
+
+            # VALIDATE & TRANSFORM TO FULL WIDTH REGIONS
+            if detected:
+                print(f"   📊 Detected {len(detected)} regions, đang lọc vùng dưới 2/3...")
+
+                # Tính ngưỡng 2/3 height
+                threshold_y = (2/3) * pip_h  # 2/3 chiều cao của video PiP
+
+                for idx, region in enumerate(detected):
+                    # LỌC: Chỉ xử lý region có Y position > 2/3 height
+                    logo_y_scaled = int(region['y'] * pip_scale)
+
+                    # BỎ QUA nếu region nằm ở 2/3 trên của video
+                    if logo_y_scaled < threshold_y:
+                        print(f"   ⏭️  Region {idx+1} SKIPPED: y={logo_y_scaled} < threshold={threshold_y:.0f}")
+                        continue
+
+                    # Region hợp lệ - Chuyển sang FULL WIDTH
+                    logo_x_scaled = pip_x  # Bắt đầu từ cạnh trái PiP
+                    logo_y_scaled = logo_y_scaled + pip_y
+                    logo_w_scaled = pip_w  # Full width của PiP
+                    logo_h_scaled = int(region['h'] * pip_scale)
+
+                    # VALIDATE: Đảm bảo region nằm trong frame
+                    if logo_y_scaled < 0:
+                        logo_y_scaled = 0
+
+                    if logo_y_scaled + logo_h_scaled > new_h:
+                        logo_h_scaled = new_h - logo_y_scaled
+
+                    # Chỉ thêm nếu height hợp lý (> 5px)
+                    if logo_h_scaled >= 5:
+                        text_regions.append({
+                            'x': logo_x_scaled,
+                            'y': logo_y_scaled,
+                            'w': logo_w_scaled,
+                            'h': logo_h_scaled
+                        })
+                        print(f"   ✅ Region {idx+1} FULL WIDTH (BOTTOM 1/3): y={logo_y_scaled}, h={logo_h_scaled}")
+                        print(f"      (Xóa toàn bộ hàng ngang: x={logo_x_scaled} đến x={logo_x_scaled + logo_w_scaled})")
+
+                print(f"   📊 Valid bottom-third regions: {len(text_regions)}/{len(detected)}")
+                print(f"   📏 Threshold Y (2/3 height): {threshold_y:.0f}px")
+
+            # XÂY DỰNG FILTER CHAIN
+            if text_regions:
+                # CÓ TEXT → Overlay + Delogo FULL WIDTH
+                delogo_filters = []
+                for region in text_regions:
+                    delogo_filters.append(
+                        f"delogo=x={region['x']}:y={region['y']}:w={region['w']}:h={region['h']}"
+                    )
+
+                overlay_base += "[v_after_overlay];[v_after_overlay]" + ",".join(delogo_filters) + "[v_after_delogo]"
+                last_video_label = "v_after_delogo"
+            else:
+                # KHÔNG CÓ TEXT → Chỉ có Overlay
+                print("   ⚠️  Không có regions hợp lệ ở vùng dưới 2/3, bỏ qua delogo")
+                overlay_base += "[v_after_overlay]"
+                last_video_label = "v_after_overlay"
+
+            # XỬ LÝ BRANDING IMAGE
             brand_img_path = req.branding_image_path
             has_branding = brand_img_path and os.path.exists(brand_img_path)
 
             if has_branding:
                 print("   ✅ Chèn Ảnh Thương hiệu: BẬT")
-                video_chain += "[v_delogo]"
-                filters.append(video_chain)
+                filters.append(overlay_base)
 
                 inputs = ["-i", vid]
                 if has_music:
@@ -118,12 +449,13 @@ def api_mix(req: MixRequest):
                     brand_idx = 2
 
                 filters.append(f"[{brand_idx}:v]scale=150:100[v_brand]")
-                filters.append(f"[v_delogo][v_brand]overlay=x=0:y=0[v_out]")
+                filters.append(f"[{last_video_label}][v_brand]overlay=x=10:y=10[v_out]")
                 video_map = "[v_out]"
             else:
                 print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")
-                video_chain += "[v_out]"
-                filters.append(video_chain)
+                # Đổi tên label cuối cùng thành v_out
+                overlay_base = overlay_base.replace(f"[{last_video_label}]", "[v_out]")
+                filters.append(overlay_base)
                 video_map = "[v_out]"
 
                 inputs = ["-i", vid]
@@ -132,8 +464,10 @@ def api_mix(req: MixRequest):
                 else:
                     inputs.extend(["-i", voice])
         else:
-            video_chain += "[v_out]"
-            filters.append(video_chain)
+            # KHÔNG XÓA LOGO
+            print("   ⚠️  Xóa Logo/Text: TẮT")
+            overlay_base += "[v_out]"
+            filters.append(overlay_base)
             video_map = "[v_out]"
 
             inputs = ["-i", vid]
@@ -142,22 +476,50 @@ def api_mix(req: MixRequest):
             else:
                 inputs.extend(["-i", voice])
 
-        # PHẦN 2: XỬ LÝ AUDIO
+        # ==================== PHẦN 2: XỬ LÝ AUDIO ====================
         if has_music:
-            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền)")
+            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền) + Audio Transform")
             duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
-            voice_idx = 2
-            music_idx = 1
+            voice_idx = 2 if not (req.remove_logo and has_branding) else 2
+            music_idx = 1 if not (req.remove_logo and has_branding) else 1
 
-            filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[voice]")
+            # VOICE PROCESSING: GIỮ NGUYÊN - Chỉ Volume + EQ cơ bản
+            voice_filter = (
+                f"[{voice_idx}:a]"
+                f"volume={req.voice_volume or 3.0},"
+                f"lowshelf=g=5:f=100:w=0.5"  # Chỉ tăng bass nhẹ cho rõ giọng
+                f"[voice]"
+            )
+            filters.append(voice_filter)
             filters.append(f"[voice]asplit[v_trig][v_mix]")
-            filters.append(f"[{music_idx}:a]volume={m_vol}[bg]")
+
+            # MUSIC PROCESSING: TRANSFORM ĐỂ TRÁNH BẢN QUYỀN
+            music_filter = (
+                f"[{music_idx}:a]"
+                f"volume={m_vol},"
+                f"highpass=f={music_highpass},"
+                f"lowpass=f={music_lowpass},"
+                f"asetrate=44100*2^({music_pitch}/12),aresample=44100,"  # Pitch shift
+                f"equalizer=f=1000:t=h:w=200:g=-2"  # Giảm mid để tránh clash với voice
+                f"[bg]"
+            )
+            filters.append(music_filter)
+
+            # DUCKING & MIXING
             filters.append(f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck]")
             filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
         else:
             print(f"   🎚️  Chế độ: VOICE ONLY (Chỉ giọng đọc)")
-            voice_idx = 1
-            filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[a_out]")
+            voice_idx = 1 if not (req.remove_logo and has_branding) else 1
+
+            # VOICE PROCESSING: GIỮ NGUYÊN - Chỉ Volume + EQ cơ bản
+            voice_filter = (
+                f"[{voice_idx}:a]"
+                f"volume={req.voice_volume or 3.0},"
+                f"lowshelf=g=5:f=100:w=0.5"  # Chỉ tăng bass nhẹ cho rõ giọng
+                f"[a_out]"
+            )
+            filters.append(voice_filter)
 
         filter_complex = ";".join(filters)
 
@@ -171,7 +533,7 @@ def api_mix(req: MixRequest):
         ]
 
         print("   ⏳ Đang render FFmpeg...")
-        print(f"   🔧 Filter: {filter_complex}")
+        print(f"   🔧 Filter (rút gọn): ...{filter_complex[-100:]}")
 
         # Kiểm tra file input
         print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
@@ -245,6 +607,21 @@ def api_mix(req: MixRequest):
         return {
             "status": "success",
             "output_file": out_file,
+            "anti_copyright_applied": {
+                "pip_scale": f"{pip_scale:.2%}",
+                "blur_strength": blur_strength,
+                "color_grading": {
+                    "saturation": f"{saturation:.2f}",
+                    "contrast": f"{contrast:.2f}",
+                    "brightness": f"+{brightness:.2f}",
+                    "gamma": f"{gamma:.2f}"
+                },
+                "audio_transform": {
+                    "voice": "UNCHANGED (giữ nguyên)",
+                    "music_pitch": f"{music_pitch:+.2f}st",
+                    "music_filters": f"HP:{music_highpass}Hz, LP:{music_lowpass}Hz"
+                }
+            },
             "resize_info": f"Giảm {reduce_dimension} đi {reduce_pixels}px",
             "render_time": f"{render_time:.2f}s",
             "total_time": f"{total_time:.2f}s",
