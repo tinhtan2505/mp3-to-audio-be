@@ -3,6 +3,7 @@ package nqt.base_java_spring_be.tts.controller;
 import jakarta.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import nqt.base_java_spring_be.dto.CustomResponse;
+import nqt.base_java_spring_be.tts.dto.DetectTextRequest;
 import nqt.base_java_spring_be.tts.dto.DubbingFileRequest;
 import nqt.base_java_spring_be.tts.dto.DubbingResult;
 import nqt.base_java_spring_be.tts.dto.MixVideoRequest;
@@ -81,6 +82,21 @@ public class DubbingController {
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(CustomResponse.error("Lỗi dịch thuật: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
+        }
+    }
+
+    @PostMapping("/vi/detect-text-regions")
+    public ResponseEntity<CustomResponse<?>> detectTextRegions(@Valid @RequestBody DetectTextRequest req) {
+        try {
+            // Gọi service
+            Object result = dubbingService.detectTextRegions(req);
+
+            return ResponseEntity.ok(
+                    CustomResponse.success(result, "Phát hiện vùng text thành công")
+            );
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(CustomResponse.error("Lỗi Detect Text: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
         }
     }
 }

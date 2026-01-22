@@ -32,6 +32,9 @@ public class DubbingServiceImpl implements DubbingService {
     @Value("${app.tts.python-translate-url}") // Cần thêm key này vào file cấu hình
     private String pythonTranslateUrl;
 
+    @Value("${app.tts.python-detect-text-url}") // Thêm key này vào application.properties
+    private String pythonDetectTextUrl;
+
     public DubbingServiceImpl() {
         this.restTemplate = new RestTemplate();
     }
@@ -283,6 +286,69 @@ public class DubbingServiceImpl implements DubbingService {
             }
         } catch (Exception e) {
             throw new RuntimeException("Không kết nối được Python Translate API: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public Object detectTextRegions(nqt.base_java_spring_be.tts.dto.DetectTextRequest req) {
+        String videoPath = req.getVideoPath();
+
+        // 1. Validate file tồn tại
+        File f = new File(videoPath);
+        if (!f.exists()) {
+            throw new RuntimeException("File video không tồn tại: " + videoPath);
+        }
+
+        try {
+            // 2. Chuẩn bị gọi Python
+            Map<String, Object> pythonResponse = callPythonDetectTextService(req);
+
+            // 3. Xử lý kết quả sơ bộ
+            String status = (String) pythonResponse.get("status");
+            if ("success".equalsIgnoreCase(status)) {
+                // Trả về toàn bộ data để Frontend vẽ bounding box
+                return pythonResponse;
+            } else {
+                throw new RuntimeException("Python detect lỗi: " + pythonResponse);
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            throw new RuntimeException("Lỗi Service Detect Text: " + e.getMessage());
+        }
+    }
+
+    // Helper gọi Python Detect
+    private Map<String, Object> callPythonDetectTextService(nqt.base_java_spring_be.tts.dto.DetectTextRequest req) {
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            // Map key Java (camelCase) sang Python (snake_case)
+            Map<String, Object> body = new HashMap<>();
+            body.put("video_path", req.getVideoPath());
+
+            // Nếu null thì mặc định Python đã xử lý, nhưng gửi luôn cho chắc
+            if (req.getSkipTopTwoThirds() != null) {
+                body.put("skip_top_two_thirds", req.getSkipTopTwoThirds());
+            }
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    pythonDetectTextUrl,
+                    org.springframework.http.HttpMethod.POST,
+                    entity,
+                    new ParameterizedTypeReference<Map<String, Object>>() {}
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                return response.getBody();
+            } else {
+                throw new RuntimeException("Lỗi HTTP Python Detect: " + response.getStatusCode());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Không kết nối được Python Detect API: " + e.getMessage());
         }
     }
 }
