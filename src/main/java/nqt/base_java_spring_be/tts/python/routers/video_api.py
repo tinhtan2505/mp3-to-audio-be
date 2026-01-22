@@ -49,354 +49,6 @@ def get_video_info(video_path):
         return None, None, None
 
 
-def detect_subtitle_roi(video_path, width, height, duration):
-    """
-    TẦNG 1: Phát hiện vùng ROI (Region of Interest) cho subtitle
-
-    Chiến lược:
-    - Lấy 3 samples ở giữa video (tránh intro/outro)
-    - OCR FULL FRAME để tìm text ở đâu
-    - Xác định Y_min, Y_max của tất cả text
-    - Expand thêm 10% để đảm bảo không bỏ sót
-
-    Returns:
-        (y_start, y_end): Vùng ROI theo pixel Y
-    """
-    print(f"\n   🔍 TẦNG 1: Phát hiện vùng ROI...")
-
-    try:
-        import cv2
-        import numpy as np
-        import pytesseract
-        import platform
-
-        # Setup Tesseract path cho Windows
-        if platform.system() == 'Windows':
-            possible_paths = [
-                r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-                r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-                r'C:\Users\tjnkt\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    pytesseract.pytesseract.tesseract_cmd = path
-                    break
-    except ImportError:
-        print("   ⚠️  Cần: pip install pytesseract opencv-python")
-        return int(height * 0.7), height  # Fallback: 30% dưới cùng
-
-    # Sample 3 frames ở giữa video
-    sample_times = [
-        duration * 0.3,
-        duration * 0.5,
-        duration * 0.7
-    ]
-
-    all_y_positions = []
-
-    for t in sample_times:
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-            temp_frame = tmp.name
-
-        try:
-            # Extract frame
-            subprocess.run([
-                "ffmpeg", "-y", "-ss", str(t), "-i", video_path,
-                "-vframes", "1", "-q:v", "2", temp_frame
-            ], capture_output=True, check=True)
-
-            frame = cv2.imread(temp_frame)
-            if frame is None:
-                continue
-
-            # Grayscale + Threshold
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-
-            # OCR để lấy bounding boxes
-            try:
-                data = pytesseract.image_to_data(
-                    thresh,
-                    lang='chi_sim+chi_tra+eng',
-                    output_type=pytesseract.Output.DICT
-                )
-            except:
-                data = pytesseract.image_to_data(
-                    thresh,
-                    output_type=pytesseract.Output.DICT
-                )
-
-            # Thu thập tất cả Y positions có text
-            for i in range(len(data['text'])):
-                if int(data['conf'][i]) > 30 and data['text'][i].strip():
-                    y = data['top'][i]
-                    h = data['height'][i]
-                    all_y_positions.append(y)
-                    all_y_positions.append(y + h)
-
-        finally:
-            if os.path.exists(temp_frame):
-                os.remove(temp_frame)
-
-    if not all_y_positions:
-        print("   ⚠️  Không phát hiện text, dùng vùng mặc định: 70-100%")
-        return int(height * 0.7), height
-
-    # Tính ROI từ min/max Y positions
-    y_min = min(all_y_positions)
-    y_max = max(all_y_positions)
-
-    # Expand 10% để đảm bảo
-    margin = int((y_max - y_min) * 0.1)
-    y_start = max(0, y_min - margin)
-    y_end = min(height, y_max + margin)
-
-    roi_percentage = ((y_end - y_start) / height) * 100
-    print(f"   ✅ ROI detected: Y {y_start}-{y_end} ({roi_percentage:.1f}% chiều cao)")
-    print(f"      → Giảm diện tích OCR: {100 - roi_percentage:.1f}%")
-
-    return y_start, y_end
-
-
-def dense_sample_roi(video_path, width, height, duration, roi_y_start, roi_y_end):
-    """
-    TẦNG 2: Dense Sampling CHỈ trong vùng ROI
-
-    Chiến lược:
-    - Sample mỗi 2 giây (video ngắn) hoặc 3 giây (video dài)
-    - Crop frame CHỈ lấy vùng ROI trước khi OCR
-    - Tốc độ tăng 3-10x so với OCR full frame
-
-    Returns:
-        List[dict]: Danh sách regions với tọa độ GLOBAL (đã cộng roi_y_start)
-    """
-    print(f"\n   🎯 TẦNG 2: Dense Sampling trong ROI...")
-
-    try:
-        import cv2
-        import pytesseract
-    except ImportError:
-        print("   ⚠️  Thiếu thư viện, bỏ qua dense sampling")
-        return []
-
-    # Tính interval dựa trên độ dài video
-    if duration <= 60:
-        interval = 1.5  # Video ngắn: sample dày hơn
-    elif duration <= 300:
-        interval = 2.0
-    else:
-        interval = 3.0  # Video dài: sample thưa hơn
-
-    sample_times = []
-    t = 5.0  # Bắt đầu từ giây 5 (skip intro)
-    while t < duration - 5:  # Dừng trước 5s cuối (skip outro)
-        sample_times.append(t)
-        t += interval
-
-    print(f"   📊 Sẽ sample {len(sample_times)} frames (interval={interval}s)")
-
-    all_regions = []
-    roi_height = roi_y_end - roi_y_start
-
-    for idx, t in enumerate(sample_times):
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-            temp_frame = tmp.name
-
-        try:
-            # Extract frame
-            subprocess.run([
-                "ffmpeg", "-y", "-ss", str(t), "-i", video_path,
-                "-vframes", "1", "-q:v", "2", temp_frame
-            ], capture_output=True, check=True)
-
-            frame = cv2.imread(temp_frame)
-            if frame is None:
-                continue
-
-            # **CROP CHỈ VÙNG ROI** - Đây là bí quyết tăng tốc
-            roi_frame = frame[roi_y_start:roi_y_end, :]
-
-            # Grayscale + Threshold
-            gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
-
-            # OCR
-            try:
-                data = pytesseract.image_to_data(
-                    thresh,
-                    lang='chi_sim+chi_tra+eng',
-                    output_type=pytesseract.Output.DICT
-                )
-            except:
-                data = pytesseract.image_to_data(
-                    thresh,
-                    output_type=pytesseract.Output.DICT
-                )
-
-            # Thu thập regions
-            frame_regions = 0
-            for i in range(len(data['text'])):
-                if int(data['conf'][i]) > 30 and data['text'][i].strip():
-                    x = data['left'][i]
-                    y = data['top'][i]  # Y trong ROI frame
-                    w = data['width'][i]
-                    h = data['height'][i]
-
-                    # Expand box 20%
-                    padding = 0.2
-                    x = max(0, int(x - w * padding))
-                    y = max(0, int(y - h * padding))
-                    w = int(w * (1 + 2 * padding))
-                    h = int(h * (1 + 2 * padding))
-
-                    # **QUAN TRỌNG: Chuyển Y về tọa độ GLOBAL**
-                    global_y = roi_y_start + y
-
-                    all_regions.append({
-                        'x': x,
-                        'y': global_y,
-                        'w': w,
-                        'h': h,
-                        'text': data['text'][i],
-                        'conf': data['conf'][i],
-                        'time': t
-                    })
-                    frame_regions += 1
-
-            if (idx + 1) % 10 == 0:
-                print(f"      Frame {idx+1}/{len(sample_times)}: {frame_regions} regions")
-
-        except Exception as e:
-            # Bỏ qua frame lỗi
-            pass
-
-        finally:
-            if os.path.exists(temp_frame):
-                os.remove(temp_frame)
-
-        # Early stopping nếu đã đủ regions
-        if len(all_regions) > 100:
-            print(f"   ⚡ Early stop: Đã có {len(all_regions)} regions")
-            break
-
-    print(f"   ✅ Tổng: {len(all_regions)} regions từ {idx+1} frames")
-    return all_regions
-
-
-def smart_merge_regions(regions, height):
-    """
-    TẦNG 3: Smart Merge sử dụng Y-clustering
-
-    Chiến lược:
-    - Group regions theo Y position (tolerance ±10px)
-    - Với mỗi group, merge các boxes có X overlap
-    - Kết quả: 1-3 regions cuối cùng (top/middle/bottom subtitles)
-
-    Returns:
-        List[dict]: Danh sách regions đã merge
-    """
-    print(f"\n   🔄 TẦNG 3: Smart Merge...")
-
-    if not regions:
-        return []
-
-    # Step 1: Cluster theo Y position (tolerance ±10px)
-    y_clusters = defaultdict(list)
-
-    for r in regions:
-        # Round Y về bội số của 10
-        y_bucket = round(r['y'] / 10) * 10
-        y_clusters[y_bucket].append(r)
-
-    print(f"   📊 Phát hiện {len(y_clusters)} Y-clusters")
-
-    # Step 2: Merge trong từng cluster
-    final_regions = []
-
-    for y_bucket, cluster_regions in y_clusters.items():
-        # Sort theo X
-        cluster_regions.sort(key=lambda r: r['x'])
-
-        merged = []
-        for r in cluster_regions:
-            # Tìm region có thể merge
-            merged_flag = False
-            for m in merged:
-                # Check X overlap (tolerance ±20px)
-                x_overlap = (
-                        max(m['x'], r['x']) < min(m['x'] + m['w'], r['x'] + r['w']) + 20
-                )
-
-                if x_overlap:
-                    # Merge: expand bounding box
-                    new_x = min(m['x'], r['x'])
-                    new_y = min(m['y'], r['y'])
-                    new_w = max(m['x'] + m['w'], r['x'] + r['w']) - new_x
-                    new_h = max(m['y'] + m['h'], r['y'] + r['h']) - new_y
-
-                    m['x'] = new_x
-                    m['y'] = new_y
-                    m['w'] = new_w
-                    m['h'] = new_h
-                    m['conf'] = max(m['conf'], r['conf'])
-                    merged_flag = True
-                    break
-
-            if not merged_flag:
-                merged.append(r.copy())
-
-        final_regions.extend(merged)
-
-    print(f"   ✅ Sau merge: {len(final_regions)} regions")
-
-    # Debug output
-    for idx, r in enumerate(final_regions):
-        print(f"      Region {idx+1}: Y={r['y']}, size={r['w']}x{r['h']}, "
-              f"text='{r['text'][:20]}...' (conf={r['conf']})")
-
-    return final_regions
-
-
-def auto_detect_text_regions_optimized(video_path):
-    """
-    PIPELINE HOÀN CHỈNH: ROI Dense Sampling
-
-    Tốc độ: 5-15 giây cho video 5 phút (vs 30-60s với cách cũ)
-    Độ chính xác: 95%+ (vs 60% với cách cũ)
-    """
-    print("   " + "="*56)
-    print("   🚀 BẮT ĐẦU: ROI Dense Sampling Pipeline")
-    print("   " + "="*56)
-
-    # Get video info
-    width, height, duration = get_video_info(video_path)
-    if not width:
-        print("   ❌ Không đọc được video info, fallback cách cũ")
-        return []
-
-    print(f"   📹 Video: {width}x{height}, {duration:.1f}s")
-
-    # TẦNG 1: Detect ROI
-    roi_y_start, roi_y_end = detect_subtitle_roi(
-        video_path, width, height, duration
-    )
-
-    # TẦNG 2: Dense Sampling
-    all_regions = dense_sample_roi(
-        video_path, width, height, duration,
-        roi_y_start, roi_y_end
-    )
-
-    # TẦNG 3: Smart Merge
-    final_regions = smart_merge_regions(all_regions, height)
-
-    print("   " + "="*56)
-    print(f"   🎉 HOÀN THÀNH: Phát hiện {len(final_regions)} vùng subtitle")
-    print("   " + "="*56 + "\n")
-
-    return final_regions
-
-
 def parse_ffmpeg_progress(line, total_duration):
     """Parse output của FFmpeg để lấy tiến độ"""
     time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', line)
@@ -543,75 +195,45 @@ def api_mix(req: MixRequest):
 
             overlay_base = f"[v_bg_blur][v_pip]overlay=(W-w)/2:(H-h)/2"
 
-        # ==================== XỬ LÝ LOGO & BRANDING (ROI DENSE SAMPLING) ====================
+        # ==================== XỬ LÝ LOGO & BRANDING (MANUAL MODE) ====================
         if req.remove_logo:
-            print("   🛡️  Xóa Logo/Text: BẬT (ROI DENSE SAMPLING MODE)")
+            print("   🛡️  Xóa Logo/Text: BẬT (MANUAL MODE)")
 
-            # TỰ ĐỘNG PHÁT HIỆN TEXT REGIONS BẰNG ROI DENSE SAMPLING
-            text_regions = []
-            print("   🔍 Tự động phát hiện text bằng ROI Dense Sampling...")
+            # Lấy giá trị từ request (giá trị gốc chưa scale)
+            logo_x_orig = req.logo_x
+            logo_y_orig = req.logo_y
+            logo_w_orig = req.logo_w
+            logo_h_orig = req.logo_h
 
-            detected = auto_detect_text_regions_optimized(vid)
+            print(f"   📍 Logo gốc: x={logo_x_orig}, y={logo_y_orig}, w={logo_w_orig}, h={logo_h_orig}")
 
-            # VALIDATE & TRANSFORM TO FULL WIDTH REGIONS
-            if detected:
-                print(f"   📊 Detected {len(detected)} regions, đang lọc vùng dưới 2/3...")
+            # Scale theo tỷ lệ PiP
+            logo_x_scaled = int(logo_x_orig * pip_scale) + pip_x
+            logo_y_scaled = int(logo_y_orig * pip_scale) + pip_y
+            logo_w_scaled = int(logo_w_orig * pip_scale)
+            logo_h_scaled = int(logo_h_orig * pip_scale)
 
-                # Tính ngưỡng 2/3 height
-                threshold_y = (2/3) * pip_h  # 2/3 chiều cao của video PiP
+            print(f"   📍 Logo scaled: x={logo_x_scaled}, y={logo_y_scaled}, w={logo_w_scaled}, h={logo_h_scaled}")
 
-                for idx, region in enumerate(detected):
-                    # Chuyển tọa độ về PiP scale
-                    logo_y_scaled = int(region['y'] * pip_scale)
+            # Validate để đảm bảo không vượt khung hình
+            if logo_y_scaled < 0:
+                logo_y_scaled = 0
+            if logo_x_scaled < 0:
+                logo_x_scaled = 0
+            if logo_y_scaled + logo_h_scaled > new_h:
+                logo_h_scaled = new_h - logo_y_scaled
+            if logo_x_scaled + logo_w_scaled > new_w:
+                logo_w_scaled = new_w - logo_x_scaled
 
-                    # BỎ QUA nếu region nằm ở 2/3 trên của video
-                    if logo_y_scaled < threshold_y:
-                        print(f"   ⏭️  Region {idx+1} SKIPPED: y={logo_y_scaled} < threshold={threshold_y:.0f}")
-                        continue
+            # Áp dụng delogo
+            overlay_base += (
+                f"[v_after_overlay];"
+                f"[v_after_overlay]delogo=x={logo_x_scaled}:y={logo_y_scaled}:w={logo_w_scaled}:h={logo_h_scaled}"
+                f"[v_after_delogo]"
+            )
+            last_video_label = "v_after_delogo"
 
-                    # Region hợp lệ - Chuyển sang FULL WIDTH
-                    logo_x_scaled = pip_x  # Bắt đầu từ cạnh trái PiP
-                    logo_y_scaled = logo_y_scaled + pip_y
-                    logo_w_scaled = pip_w  # Full width của PiP
-                    logo_h_scaled = int(region['h'] * pip_scale)
-
-                    # VALIDATE: Đảm bảo region nằm trong frame
-                    if logo_y_scaled < 0:
-                        logo_y_scaled = 0
-
-                    if logo_y_scaled + logo_h_scaled > new_h:
-                        logo_h_scaled = new_h - logo_y_scaled
-
-                    # Chỉ thêm nếu height hợp lý (> 5px)
-                    if logo_h_scaled >= 5:
-                        text_regions.append({
-                            'x': logo_x_scaled,
-                            'y': logo_y_scaled,
-                            'w': logo_w_scaled,
-                            'h': logo_h_scaled
-                        })
-                        print(f"   ✅ Region {idx+1} FULL WIDTH (BOTTOM 1/3): y={logo_y_scaled}, h={logo_h_scaled}")
-                        print(f"      (Xóa toàn bộ hàng ngang: x={logo_x_scaled} đến x={logo_x_scaled + logo_w_scaled})")
-
-                print(f"   📊 Valid bottom-third regions: {len(text_regions)}/{len(detected)}")
-                print(f"   📏 Threshold Y (2/3 height): {threshold_y:.0f}px")
-
-            # XÂY DỰNG FILTER CHAIN
-            if text_regions:
-                # CÓ TEXT → Overlay + Delogo FULL WIDTH
-                delogo_filters = []
-                for region in text_regions:
-                    delogo_filters.append(
-                        f"delogo=x={region['x']}:y={region['y']}:w={region['w']}:h={region['h']}"
-                    )
-
-                overlay_base += "[v_after_overlay];[v_after_overlay]" + ",".join(delogo_filters) + "[v_after_delogo]"
-                last_video_label = "v_after_delogo"
-            else:
-                # KHÔNG CÓ TEXT → Chỉ có Overlay
-                print("   ⚠️  Không có regions hợp lệ ở vùng dưới 2/3, bỏ qua delogo")
-                overlay_base += "[v_after_overlay]"
-                last_video_label = "v_after_overlay"
+            print(f"   ✅ Đã áp dụng delogo tại vùng scaled")
 
             # XỬ LÝ BRANDING IMAGE
             brand_img_path = req.branding_image_path
@@ -661,8 +283,8 @@ def api_mix(req: MixRequest):
         if has_music:
             print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền) + Audio Transform")
             duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
-            voice_idx = 2 if not (req.remove_logo and has_branding) else 2
-            music_idx = 1 if not (req.remove_logo and has_branding) else 1
+            voice_idx = 2 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 2
+            music_idx = 1 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 1
 
             # VOICE PROCESSING: GIỮ NGUYÊN - Chỉ Volume + EQ cơ bản
             voice_filter = (
@@ -691,7 +313,7 @@ def api_mix(req: MixRequest):
             filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
         else:
             print(f"   🎚️  Chế độ: VOICE ONLY (Chỉ giọng đọc)")
-            voice_idx = 1 if not (req.remove_logo and has_branding) else 1
+            voice_idx = 1 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 1
 
             # VOICE PROCESSING: GIỮ NGUYÊN - Chỉ Volume + EQ cơ bản
             voice_filter = (
@@ -803,7 +425,11 @@ def api_mix(req: MixRequest):
                     "music_filters": f"HP:{music_highpass}Hz, LP:{music_lowpass}Hz"
                 }
             },
-            "text_detection_method": "ROI_Dense_Sampling" if req.remove_logo else "None",
+            "logo_removal": {
+                "enabled": req.remove_logo,
+                "original_coords": f"x={req.logo_x}, y={req.logo_y}, w={req.logo_w}, h={req.logo_h}" if req.remove_logo else None,
+                "scaled_coords": f"x={logo_x_scaled}, y={logo_y_scaled}, w={logo_w_scaled}, h={logo_h_scaled}" if req.remove_logo else None
+            },
             "resize_info": f"Giảm {reduce_dimension} đi {reduce_pixels}px",
             "render_time": f"{render_time:.2f}s",
             "total_time": f"{total_time:.2f}s",

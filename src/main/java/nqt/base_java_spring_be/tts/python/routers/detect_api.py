@@ -443,40 +443,99 @@ def export_preview_image(video_path, regions, width, height, output_dir=None):
 
         # Vẽ bounding boxes
         colors = [
-            (0, 255, 0),    # Green
-            (255, 0, 0),    # Blue
-            (0, 0, 255),    # Red
-            (255, 255, 0),  # Cyan
-            (255, 0, 255),  # Magenta
+            (0, 255, 0),      # Green
+            (255, 0, 0),      # Blue
+            (0, 0, 255),      # Red
+            (255, 255, 0),    # Cyan
+            (255, 0, 255),    # Magenta
+            (0, 255, 255),    # Yellow
+            (128, 0, 255),    # Purple
+            (255, 128, 0),    # Orange
         ]
 
-        for idx, region in enumerate(regions):
-            x, y, w, h = region['x'], region['y'], region['w'], region['h']
-            color = colors[idx % len(colors)]
+        # Sort regions theo Y để vẽ từ trên xuống dưới
+        sorted_regions = sorted(enumerate(regions), key=lambda x: x[1]['y'])
 
-            # Vẽ rectangle
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
+        # Track vị trí labels đã vẽ để tránh overlap
+        used_label_positions = []
+
+        for idx, (original_idx, region) in enumerate(sorted_regions):
+            x, y, w, h = region['x'], region['y'], region['w'], region['h']
+            color = colors[original_idx % len(colors)]
+
+            # Vẽ rectangle với độ dày nhỏ hơn
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
 
             # Vẽ label
-            label = f"Region {idx + 1}"
+            label = f"R{original_idx + 1}"  # Rút gọn label
             font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 0.8
+            font_scale = 0.6
             thickness = 2
 
-            # Background cho text
-            (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
-            cv2.rectangle(frame, (x, y - text_height - 10), (x + text_width, y), color, -1)
+            # Tính kích thước text
+            (text_width, text_height), baseline = cv2.getTextSize(label, font, font_scale, thickness)
 
-            # Text
-            cv2.putText(frame, label, (x, y - 5), font, font_scale, (255, 255, 255), thickness)
+            # Tìm vị trí tối ưu cho label (tránh overlap)
+            label_positions = [
+                (x, y - 8),                           # Trên box
+                (x + w - text_width, y - 8),          # Trên box, bên phải
+                (x, y + h + text_height + 8),         # Dưới box
+                (x + w - text_width, y + h + text_height + 8),  # Dưới box, bên phải
+                (x - text_width - 5, y + text_height), # Bên trái box
+                (x + w + 5, y + text_height),         # Bên phải box
+            ]
 
-        # Thêm thông tin tổng quan
+            # Chọn vị trí không bị overlap
+            label_x, label_y = label_positions[0]  # Mặc định
+            for pos_x, pos_y in label_positions:
+                # Kiểm tra overlap với các labels đã vẽ
+                overlap = False
+                for used_x, used_y, used_w, used_h in used_label_positions:
+                    if not (pos_x + text_width < used_x or
+                            pos_x > used_x + used_w or
+                            pos_y < used_y or
+                            pos_y - text_height > used_y + used_h):
+                        overlap = True
+                        break
+
+                if not overlap:
+                    label_x, label_y = pos_x, pos_y
+                    break
+
+            # Đảm bảo label nằm trong frame
+            label_x = max(0, min(label_x, frame.shape[1] - text_width))
+            label_y = max(text_height, min(label_y, frame.shape[0]))
+
+            # Vẽ background cho text với alpha blending
+            overlay = frame.copy()
+            cv2.rectangle(overlay,
+                          (label_x - 2, label_y - text_height - 4),
+                          (label_x + text_width + 2, label_y + 4),
+                          color, -1)
+            cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
+            # Vẽ text
+            cv2.putText(frame, label, (label_x, label_y), font, font_scale,
+                        (255, 255, 255), thickness)
+
+            # Lưu vị trí label đã vẽ
+            used_label_positions.append((label_x, label_y - text_height, text_width, text_height))
+
+        # Thêm thông tin tổng quan ở góc trên
         info_text = f"Total Regions: {len(regions)} | Video: {width}x{height}"
-        cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (255, 255, 255), 2)
-        cv2.rectangle(frame, (5, 5), (len(info_text) * 12, 40), (0, 0, 0), -1)
-        cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 0), 2)
+        info_font_scale = 0.7
+        info_thickness = 2
+        (info_width, info_height), _ = cv2.getTextSize(info_text, cv2.FONT_HERSHEY_SIMPLEX,
+                                                       info_font_scale, info_thickness)
+
+        # Background đen semi-transparent
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (5, 5), (info_width + 15, info_height + 20), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
+
+        # Text xanh lá
+        cv2.putText(frame, info_text, (10, info_height + 12), cv2.FONT_HERSHEY_SIMPLEX,
+                    info_font_scale, (0, 255, 0), info_thickness)
 
         # Lưu ảnh
         cv2.imwrite(output_path, frame)
@@ -557,8 +616,11 @@ def api_detect_text_regions(req: DetectTextRequest):
                 filtered_regions.append(region)
 
                 # Log tọa độ
+                bottom_right_x = region['x'] + region['w']
+                bottom_right_y = region['y'] + region['h']
                 print(f"   ✅ Region {idx+1} KEPT (bottom 1/3): "
-                      f"Pos(x,y)=({region['x']}, {region['y']}) | "
+                      f"TopLeft(x,y)=({region['x']}, {region['y']}) | "
+                      f"BottomRight(x,y)=({bottom_right_x}, {bottom_right_y}) | "
                       f"Size(w,h)={region['w']}x{region['h']}")
         else:
             filtered_regions = merged_regions
