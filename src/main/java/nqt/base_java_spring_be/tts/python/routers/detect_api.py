@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional
@@ -15,6 +16,8 @@ router = APIRouter()
 class DetectTextRequest(BaseModel):
     video_path: str
     skip_top_two_thirds: bool = True  # Mặc định bỏ qua 2/3 trên
+    export_preview: bool = True  # Export ảnh preview
+    preview_output_dir: Optional[str] = None  # Thư mục lưu preview (mặc định: cùng thư mục video)
 
 class TextRegion(BaseModel):
     logo_x: int
@@ -34,6 +37,7 @@ class DetectTextResponse(BaseModel):
     regions_after_filter: int
     skip_threshold_y: Optional[int]
     regions: List[TextRegion]
+    preview_image_path: Optional[str] = None  # Đường dẫn ảnh preview
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -379,6 +383,119 @@ def smart_merge_regions(regions, height):
     return final_regions
 
 
+def export_preview_image(video_path, regions, width, height, output_dir=None):
+    """
+    Export ảnh preview với bounding boxes vẽ trên frame video
+
+    Args:
+        video_path: Đường dẫn video
+        regions: Danh sách regions đã phát hiện
+        width, height: Kích thước video
+        output_dir: Thư mục output (mặc định: cùng thư mục video)
+
+    Returns:
+        str: Đường dẫn file ảnh đã lưu
+    """
+    print(f"\n   🖼️  EXPORT PREVIEW IMAGE...")
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("   ⚠️  Cần: pip install opencv-python")
+        return None
+
+    if not regions:
+        print("   ⚠️  Không có regions để preview")
+        return None
+
+    # Xác định thư mục output
+    if output_dir is None:
+        output_dir = str(Path(video_path).parent)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Tạo tên file output
+    video_name = Path(video_path).stem
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"{video_name}_regions_preview_{timestamp}.jpg"
+    output_path = os.path.join(output_dir, output_filename)
+
+    # Extract một frame ở giữa video để preview
+    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+        temp_frame = tmp.name
+
+    try:
+        # Lấy frame ở giữa video
+        duration = get_video_duration(video_path)
+        middle_time = duration / 2 if duration else 10.0
+
+        subprocess.run([
+            "ffmpeg", "-y", "-ss", str(middle_time), "-i", video_path,
+            "-vframes", "1", "-q:v", "2", temp_frame
+        ], capture_output=True, check=True)
+
+        # Đọc frame
+        frame = cv2.imread(temp_frame)
+        if frame is None:
+            print("   ⚠️  Không thể đọc frame")
+            return None
+
+        # Vẽ bounding boxes
+        colors = [
+            (0, 255, 0),    # Green
+            (255, 0, 0),    # Blue
+            (0, 0, 255),    # Red
+            (255, 255, 0),  # Cyan
+            (255, 0, 255),  # Magenta
+        ]
+
+        for idx, region in enumerate(regions):
+            x, y, w, h = region['x'], region['y'], region['w'], region['h']
+            color = colors[idx % len(colors)]
+
+            # Vẽ rectangle
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 3)
+
+            # Vẽ label
+            label = f"Region {idx + 1}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.8
+            thickness = 2
+
+            # Background cho text
+            (text_width, text_height), _ = cv2.getTextSize(label, font, font_scale, thickness)
+            cv2.rectangle(frame, (x, y - text_height - 10), (x + text_width, y), color, -1)
+
+            # Text
+            cv2.putText(frame, label, (x, y - 5), font, font_scale, (255, 255, 255), thickness)
+
+        # Thêm thông tin tổng quan
+        info_text = f"Total Regions: {len(regions)} | Video: {width}x{height}"
+        cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (255, 255, 255), 2)
+        cv2.rectangle(frame, (5, 5), (len(info_text) * 12, 40), (0, 0, 0), -1)
+        cv2.putText(frame, info_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (0, 255, 0), 2)
+
+        # Lưu ảnh
+        cv2.imwrite(output_path, frame)
+
+        print(f"   ✅ Preview đã lưu: {output_path}")
+
+        return output_path
+
+    except Exception as e:
+        print(f"   ❌ Lỗi export preview: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+    finally:
+        if os.path.exists(temp_frame):
+            os.remove(temp_frame)
+
+
 # ==================== API ENDPOINT ====================
 
 @router.post("/api/v1/dubbing/detect-text-regions", response_model=DetectTextResponse)
@@ -389,6 +506,7 @@ def api_detect_text_regions(req: DetectTextRequest):
     Returns:
         - Danh sách regions với tọa độ CHƯA scaled (original video size)
         - Mặc định BỎ QUA regions ở 2/3 trên của video
+        - Export ảnh preview nếu được yêu cầu
     """
     import time
 
@@ -434,22 +552,32 @@ def api_detect_text_regions(req: DetectTextRequest):
             for idx, region in enumerate(merged_regions):
                 # Kiểm tra Y position (CHƯA scaled)
                 if region['y'] < skip_threshold_y:
-                    # (Optional) Uncomment dòng dưới nếu muốn xem log các vùng bị bỏ qua
-                    # print(f"   ⏭️  Region {idx+1} SKIPPED: y={region['y']} < threshold={skip_threshold_y}")
                     continue
 
                 filtered_regions.append(region)
 
-                # --- CẬP NHẬT LOG HIỂN THỊ TỌA ĐỘ (X, Y) VÀ CHIỀU CAO (H) ---
+                # Log tọa độ
                 print(f"   ✅ Region {idx+1} KEPT (bottom 1/3): "
                       f"Pos(x,y)=({region['x']}, {region['y']}) | "
                       f"Size(w,h)={region['w']}x{region['h']}")
         else:
             filtered_regions = merged_regions
             print("\n   ℹ️  Không lọc regions (giữ tất cả)")
-            # Log cho trường hợp giữ tất cả
             for idx, region in enumerate(filtered_regions):
                 print(f"   ✅ Region {idx+1}: Pos(x,y)=({region['x']}, {region['y']}) | Size(w,h)={region['w']}x{region['h']}")
+
+        # EXPORT PREVIEW IMAGE
+        preview_path = None
+        if req.export_preview:
+            preview_path = export_preview_image(
+                req.video_path,
+                filtered_regions,
+                width,
+                height,
+                req.preview_output_dir
+            )
+            if preview_path:
+                print(f"\n   📸 Preview Image URL: {preview_path}")
 
         # Chuyển đổi sang format output
         output_regions = []
@@ -483,7 +611,8 @@ def api_detect_text_regions(req: DetectTextRequest):
             total_regions_found=len(merged_regions),
             regions_after_filter=len(filtered_regions),
             skip_threshold_y=skip_threshold_y,
-            regions=output_regions
+            regions=output_regions,
+            preview_image_path=preview_path
         )
 
     except FileNotFoundError as e:
