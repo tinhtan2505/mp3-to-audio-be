@@ -65,7 +65,7 @@ def parse_ffmpeg_progress(line, total_duration):
 @router.post("/api/v1/dubbing/mix-video")
 def api_mix(req: MixRequest):
     start_time = time.time()
-    Logger.section("GHÉP VIDEO (FFMPEG) - ANTI-COPYRIGHT MODE")
+    Logger.section("GHÉP VIDEO (FFMPEG) - ANTI-COPYRIGHT MODE (CROP)")
 
     try:
         vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
@@ -80,18 +80,36 @@ def api_mix(req: MixRequest):
         video_dir = os.path.dirname(vid)
         out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
 
-        # Lấy thời lượng video để tính progress
+        # Lấy thông tin video
         print("   📊 Đang phân tích video...")
-        total_duration = get_video_duration(vid)
+        orig_w, orig_h, total_duration = get_video_info(vid)
+
+        if not orig_w or not orig_h:
+            raise Exception("Không thể lấy thông tin kích thước video")
+
         if total_duration:
             print(f"   ⏱️  Thời lượng video: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
+        print(f"   📐 Kích thước gốc: {orig_w}x{orig_h}")
 
         # ==================== ANTI-COPYRIGHT PARAMETERS ====================
 
-        # 1. PICTURE-IN-PIP PARAMETERS (Quan trọng nhất!)
-        pip_scale = random.uniform(0.82, 0.88)  # Thu nhỏ video 82-88%
-        blur_strength = random.randint(15, 25)  # Độ mờ nền
-        pip_padding = random.randint(40, 80)    # Khoảng cách viền
+        # 1. RANDOM CROP PARAMETERS (Quan trọng nhất!)
+        crop_percent_w = random.uniform(0.88, 0.94)  # Crop 6-12% chiều rộng
+        crop_percent_h = random.uniform(0.88, 0.94)  # Crop 6-12% chiều cao
+
+        # Tính kích thước sau crop
+        crop_w = int(orig_w * crop_percent_w)
+        crop_h = int(orig_h * crop_percent_h)
+
+        # Đảm bảo chẵn
+        crop_w = crop_w if crop_w % 2 == 0 else crop_w - 1
+        crop_h = crop_h if crop_h % 2 == 0 else crop_h - 1
+
+        # Random vị trí crop (không phải luôn center)
+        max_x = orig_w - crop_w
+        max_y = orig_h - crop_h
+        crop_x = random.randint(0, max_x) if max_x > 0 else 0
+        crop_y = random.randint(0, max_y) if max_y > 0 else 0
 
         # 2. COLOR GRADING PARAMETERS
         saturation = random.uniform(1.15, 1.35)     # Tăng độ bão hòa 15-35%
@@ -104,136 +122,71 @@ def api_mix(req: MixRequest):
         music_highpass = random.randint(60, 100)    # High-pass filter cho music
         music_lowpass = random.randint(15000, 18000) # Low-pass filter cho music
 
-        # 4. RANDOM RESIZE (bổ sung)
-        reduce_dimension = random.choice(['width', 'height'])
-        reduce_pixels = random.randint(2, 6)
-
-        print("   🛡️  ======= CHẾ ĐỘ CHỐNG BẢN QUYỀN ======")
-        print(f"   📺 PiP Scale: {pip_scale:.2%} | Blur: {blur_strength}px | Padding: {pip_padding}px")
+        print("   🛡️  ======= CHẾ ĐỘ CHỐNG BẢN QUYỀN (CROP) ======")
+        print(f"   ✂️  Crop: {orig_w}x{orig_h} → {crop_w}x{crop_h} ({crop_percent_w:.1%}x{crop_percent_h:.1%})")
+        print(f"   📍 Crop position: x={crop_x}, y={crop_y}")
         print(f"   🎨 Color: Sat={saturation:.2f} | Con={contrast:.2f} | Bri=+{brightness:.2f} | Gamma={gamma:.2f}")
         print(f"   🎵 Audio Transform (CHỈ NHẠC NỀN): Pitch={music_pitch:+.2f}st | HP={music_highpass}Hz | LP={music_lowpass}Hz")
         print(f"   🎤 Voice: GIỮ NGUYÊN (không transform)")
-        print(f"   🎲 Random Resize: Giảm {reduce_dimension} đi {reduce_pixels}px")
 
         # Cấu hình inputs
         inputs = []
         filters = []
 
         # ==================== PHẦN 1: XỬ LÝ VIDEO ====================
-        try:
-            probe_size = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=width,height", "-of", "csv=p=0", vid],
-                capture_output=True, text=True, check=True
-            )
-            orig_w, orig_h = map(int, probe_size.stdout.strip().split(','))
 
-            # Tính toán kích thước sau khi resize
-            if reduce_dimension == 'width':
-                new_w = orig_w - reduce_pixels
-                new_h = orig_h
-            else:
-                new_w = orig_w
-                new_h = orig_h - reduce_pixels
-
-            new_w = new_w if new_w % 2 == 0 else new_w - 1
-            new_h = new_h if new_h % 2 == 0 else new_h - 1
-
-            # Tính toán kích thước PiP
-            pip_w = int(new_w * pip_scale)
-            pip_h = int(new_h * pip_scale)
-            pip_w = pip_w if pip_w % 2 == 0 else pip_w - 1
-            pip_h = pip_h if pip_h % 2 == 0 else pip_h - 1
-
-            # Vị trí PiP (centered)
-            pip_x = (new_w - pip_w) // 2
-            pip_y = (new_h - pip_h) // 2
-
-            print(f"   📐 Kích thước: {orig_w}x{orig_h} → {new_w}x{new_h}")
-            print(f"   📐 PiP: {pip_w}x{pip_h} tại vị trí ({pip_x}, {pip_y})")
-
-            # FILTER CHAIN:
-            # 1. Scale + Color Grading cho video chính (PiP)
-            video_chain = (
-                f"[0:v]scale={new_w}:{new_h},"
-                f"eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
-                f"[v_colored]"
-            )
-            filters.append(video_chain)
-
-            # 2. Tạo nền mờ từ video gốc
-            bg_chain = (
-                f"[v_colored]scale={new_w}:{new_h},"
-                f"gblur=sigma={blur_strength},"
-                f"eq=brightness=-0.1:contrast=0.8"  # Làm tối nền một chút
-                f"[v_bg_blur]"
-            )
-            filters.append(bg_chain)
-
-            # 3. Scale video PiP
-            pip_chain = f"[v_colored]scale={pip_w}:{pip_h}[v_pip]"
-            filters.append(pip_chain)
-
-            # 4. Overlay PiP lên nền mờ
-            overlay_base = f"[v_bg_blur][v_pip]overlay={pip_x}:{pip_y}"
-
-        except Exception as e:
-            print(f"   ⚠️  Không lấy được kích thước video: {e}")
-            # Fallback với scale động
-            video_chain = (
-                f"[0:v]scale=iw-{reduce_pixels}:ih,"
-                f"eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
-                f"[v_colored]"
-            )
-            filters.append(video_chain)
-
-            bg_chain = f"[v_colored]gblur=sigma={blur_strength}[v_bg_blur]"
-            filters.append(bg_chain)
-
-            pip_chain = f"[v_colored]scale=iw*{pip_scale}:ih*{pip_scale}[v_pip]"
-            filters.append(pip_chain)
-
-            overlay_base = f"[v_bg_blur][v_pip]overlay=(W-w)/2:(H-h)/2"
+        # FILTER CHAIN:
+        # 1. Crop video
+        video_chain = (
+            f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
+            f"eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
+            f"[v_cropped]"
+        )
+        filters.append(video_chain)
 
         # ==================== XỬ LÝ LOGO & BRANDING (MANUAL MODE) ====================
         if req.remove_logo:
-            print("   🛡️  Xóa Logo/Text: BẬT (MANUAL MODE)")
+            print("   🛡️  Xóa Logo/Text: BẬT (MANUAL MODE với CROP)")
 
-            # Lấy giá trị từ request (giá trị gốc chưa scale)
+            # Lấy giá trị từ request (tọa độ gốc)
             logo_x_orig = req.logo_x
             logo_y_orig = req.logo_y
             logo_w_orig = req.logo_w
             logo_h_orig = req.logo_h
 
-            print(f"   📍 Logo gốc: x={logo_x_orig}, y={logo_y_orig}, w={logo_w_orig}, h={logo_h_orig}")
+            print(f"   📍 Logo gốc (trước crop): x={logo_x_orig}, y={logo_y_orig}, w={logo_w_orig}, h={logo_h_orig}")
 
-            # Scale theo tỷ lệ PiP
-            logo_x_scaled = int(logo_x_orig * pip_scale) + pip_x
-            logo_y_scaled = int(logo_y_orig * pip_scale) + pip_y
-            logo_w_scaled = int(logo_w_orig * pip_scale)
-            logo_h_scaled = int(logo_h_orig * pip_scale)
+            # Điều chỉnh tọa độ logo theo crop offset
+            logo_x_cropped = logo_x_orig - crop_x
+            logo_y_cropped = logo_y_orig - crop_y
 
-            print(f"   📍 Logo scaled: x={logo_x_scaled}, y={logo_y_scaled}, w={logo_w_scaled}, h={logo_h_scaled}")
+            print(f"   📍 Logo sau crop: x={logo_x_cropped}, y={logo_y_cropped}, w={logo_w_orig}, h={logo_h_orig}")
 
-            # Validate để đảm bảo không vượt khung hình
-            if logo_y_scaled < 0:
-                logo_y_scaled = 0
-            if logo_x_scaled < 0:
-                logo_x_scaled = 0
-            if logo_y_scaled + logo_h_scaled > new_h:
-                logo_h_scaled = new_h - logo_y_scaled
-            if logo_x_scaled + logo_w_scaled > new_w:
-                logo_w_scaled = new_w - logo_x_scaled
+            # Validate để đảm bảo logo vẫn trong khung hình sau crop
+            if logo_x_cropped < 0:
+                logo_w_orig += logo_x_cropped  # Giảm width nếu bị crop bên trái
+                logo_x_cropped = 0
+            if logo_y_cropped < 0:
+                logo_h_orig += logo_y_cropped  # Giảm height nếu bị crop bên trên
+                logo_y_cropped = 0
+            if logo_y_cropped + logo_h_orig > crop_h:
+                logo_h_orig = crop_h - logo_y_cropped
+            if logo_x_cropped + logo_w_orig > crop_w:
+                logo_w_orig = crop_w - logo_x_cropped
 
-            # Áp dụng delogo
-            overlay_base += (
-                f"[v_after_overlay];"
-                f"[v_after_overlay]delogo=x={logo_x_scaled}:y={logo_y_scaled}:w={logo_w_scaled}:h={logo_h_scaled}"
-                f"[v_after_delogo]"
-            )
-            last_video_label = "v_after_delogo"
-
-            print(f"   ✅ Đã áp dụng delogo tại vùng scaled")
+            # Chỉ áp dụng delogo nếu logo vẫn nằm trong vùng crop
+            if logo_w_orig > 0 and logo_h_orig > 0 and logo_x_cropped >= 0 and logo_y_cropped >= 0:
+                # Áp dụng delogo
+                delogo_chain = (
+                    f"[v_cropped]delogo=x={logo_x_cropped}:y={logo_y_cropped}:"
+                    f"w={logo_w_orig}:h={logo_h_orig}[v_after_delogo]"
+                )
+                filters.append(delogo_chain)
+                last_video_label = "v_after_delogo"
+                print(f"   ✅ Đã áp dụng delogo tại vùng crop-adjusted")
+            else:
+                print(f"   ⚠️  Logo nằm ngoài vùng crop, bỏ qua delogo")
+                last_video_label = "v_cropped"
 
             # XỬ LÝ BRANDING IMAGE
             brand_img_path = req.branding_image_path
@@ -241,7 +194,6 @@ def api_mix(req: MixRequest):
 
             if has_branding:
                 print("   ✅ Chèn Ảnh Thương hiệu: BẬT")
-                filters.append(overlay_base)
 
                 inputs = ["-i", vid]
                 if has_music:
@@ -257,8 +209,10 @@ def api_mix(req: MixRequest):
             else:
                 print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")
                 # Đổi tên label cuối cùng thành v_out
-                overlay_base = overlay_base.replace(f"[{last_video_label}]", "[v_out]")
-                filters.append(overlay_base)
+                if last_video_label != "v_cropped":
+                    filters[-1] = filters[-1].replace(f"[{last_video_label}]", "[v_out]")
+                else:
+                    filters[-1] = filters[-1].replace("[v_cropped]", "[v_out]")
                 video_map = "[v_out]"
 
                 inputs = ["-i", vid]
@@ -269,8 +223,7 @@ def api_mix(req: MixRequest):
         else:
             # KHÔNG XÓA LOGO
             print("   ⚠️  Xóa Logo/Text: TẮT")
-            overlay_base += "[v_out]"
-            filters.append(overlay_base)
+            filters[-1] = filters[-1].replace("[v_cropped]", "[v_out]")
             video_map = "[v_out]"
 
             inputs = ["-i", vid]
@@ -290,7 +243,7 @@ def api_mix(req: MixRequest):
             voice_filter = (
                 f"[{voice_idx}:a]"
                 f"volume={req.voice_volume or 3.0},"
-                f"lowshelf=g=5:f=100:w=0.5"  # Chỉ tăng bass nhẹ cho rõ giọng
+                f"lowshelf=g=5:f=100:w=0.5"
                 f"[voice]"
             )
             filters.append(voice_filter)
@@ -302,8 +255,8 @@ def api_mix(req: MixRequest):
                 f"volume={m_vol},"
                 f"highpass=f={music_highpass},"
                 f"lowpass=f={music_lowpass},"
-                f"asetrate=44100*2^({music_pitch}/12),aresample=44100,"  # Pitch shift
-                f"equalizer=f=1000:t=h:w=200:g=-2"  # Giảm mid để tránh clash với voice
+                f"asetrate=44100*2^({music_pitch}/12),aresample=44100,"
+                f"equalizer=f=1000:t=h:w=200:g=-2"
                 f"[bg]"
             )
             filters.append(music_filter)
@@ -315,18 +268,18 @@ def api_mix(req: MixRequest):
             print(f"   🎚️  Chế độ: VOICE ONLY (Chỉ giọng đọc)")
             voice_idx = 1 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 1
 
-            # VOICE PROCESSING: GIỮ NGUYÊN - Chỉ Volume + EQ cơ bản
+            # VOICE PROCESSING: GIỮ NGUYÊN
             voice_filter = (
                 f"[{voice_idx}:a]"
                 f"volume={req.voice_volume or 3.0},"
-                f"lowshelf=g=5:f=100:w=0.5"  # Chỉ tăng bass nhẹ cho rõ giọng
+                f"lowshelf=g=5:f=100:w=0.5"
                 f"[a_out]"
             )
             filters.append(voice_filter)
 
         filter_complex = ";".join(filters)
 
-        # Tạo lệnh FFmpeg với progress output
+        # Tạo lệnh FFmpeg
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1"] + inputs + [
             "-filter_complex", filter_complex,
             "-map", video_map, "-map", "[a_out]",
@@ -337,12 +290,6 @@ def api_mix(req: MixRequest):
 
         print("   ⏳ Đang render FFmpeg...")
         print(f"   🔧 Filter (rút gọn): ...{filter_complex[-100:]}")
-
-        # Kiểm tra file input
-        print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
-        print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
-        if has_music:
-            print(f"   🎵 Music: {inst} ({os.path.getsize(inst)} bytes)")
 
         # Chạy FFmpeg với real-time progress tracking
         print("\n" + "="*60)
@@ -359,7 +306,6 @@ def api_mix(req: MixRequest):
 
         stderr_output = []
 
-        # Đọc stderr trong thread riêng để capture errors
         import threading
         def read_stderr():
             for line in process.stderr:
@@ -369,14 +315,12 @@ def api_mix(req: MixRequest):
         stderr_thread.daemon = True
         stderr_thread.start()
 
-        # Đọc progress từ stdout
         for line in process.stdout:
             current_time, progress = parse_ffmpeg_progress(line, total_duration)
 
             if progress is not None:
                 elapsed = time.time() - render_start
 
-                # Cập nhật progress mỗi 2% hoặc mỗi 5 giây
                 if progress - last_progress_update >= 2 or elapsed - last_progress_update >= 5:
                     if progress > 0:
                         eta = (elapsed / progress * 100) - elapsed
@@ -392,7 +336,7 @@ def api_mix(req: MixRequest):
 
         if process.returncode != 0:
             print("\n❌ FFMPEG STDERR:")
-            print("".join(stderr_output[-20:]))  # In 20 dòng cuối
+            print("".join(stderr_output[-20:]))
             raise subprocess.CalledProcessError(
                 process.returncode, cmd,
                 stderr="".join(stderr_output)
@@ -411,8 +355,12 @@ def api_mix(req: MixRequest):
             "status": "success",
             "output_file": out_file,
             "anti_copyright_applied": {
-                "pip_scale": f"{pip_scale:.2%}",
-                "blur_strength": blur_strength,
+                "crop_info": {
+                    "original": f"{orig_w}x{orig_h}",
+                    "cropped": f"{crop_w}x{crop_h}",
+                    "position": f"x={crop_x}, y={crop_y}",
+                    "crop_percent": f"{crop_percent_w:.1%}x{crop_percent_h:.1%}"
+                },
                 "color_grading": {
                     "saturation": f"{saturation:.2f}",
                     "contrast": f"{contrast:.2f}",
@@ -428,9 +376,8 @@ def api_mix(req: MixRequest):
             "logo_removal": {
                 "enabled": req.remove_logo,
                 "original_coords": f"x={req.logo_x}, y={req.logo_y}, w={req.logo_w}, h={req.logo_h}" if req.remove_logo else None,
-                "scaled_coords": f"x={logo_x_scaled}, y={logo_y_scaled}, w={logo_w_scaled}, h={logo_h_scaled}" if req.remove_logo else None
+                "cropped_coords": f"x={logo_x_cropped if req.remove_logo else 'N/A'}, y={logo_y_cropped if req.remove_logo else 'N/A'}" if req.remove_logo else None
             },
-            "resize_info": f"Giảm {reduce_dimension} đi {reduce_pixels}px",
             "render_time": f"{render_time:.2f}s",
             "total_time": f"{total_time:.2f}s",
             "file_size_mb": f"{os.path.getsize(out_file) / 1024 / 1024:.2f}"
