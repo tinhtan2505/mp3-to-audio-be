@@ -454,20 +454,24 @@ def export_preview_image(video_path, regions, width, height, output_dir=None):
         ]
 
         # Sort regions theo Y để vẽ từ trên xuống dưới
-        sorted_regions = sorted(enumerate(regions), key=lambda x: x[1]['y'])
+        sorted_regions = sorted(regions, key=lambda x: x['y'])
 
         # Track vị trí labels đã vẽ để tránh overlap
         used_label_positions = []
 
-        for idx, (original_idx, region) in enumerate(sorted_regions):
+        for idx, region in enumerate(sorted_regions):
             x, y, w, h = region['x'], region['y'], region['w'], region['h']
-            color = colors[original_idx % len(colors)]
+
+            # Lấy original_idx từ region (đã được gán trước đó)
+            original_idx = region.get('original_idx', idx + 1)
+
+            color = colors[idx % len(colors)]
 
             # Vẽ rectangle với độ dày nhỏ hơn
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
 
-            # Vẽ label
-            label = f"R{original_idx + 1}"  # Rút gọn label
+            # Vẽ label với ORIGINAL INDEX
+            label = f"R{original_idx}"
             font = cv2.FONT_HERSHEY_SIMPLEX
             font_scale = 0.6
             thickness = 2
@@ -613,6 +617,8 @@ def api_detect_text_regions(req: DetectTextRequest):
                 if region['y'] < skip_threshold_y:
                     continue
 
+                # Thêm original_idx để giữ nguyên số thứ tự
+                region['original_idx'] = idx + 1
                 filtered_regions.append(region)
 
                 # Log tọa độ
@@ -625,15 +631,22 @@ def api_detect_text_regions(req: DetectTextRequest):
         else:
             filtered_regions = merged_regions
             print("\n   ℹ️  Không lọc regions (giữ tất cả)")
-            for idx, region in enumerate(filtered_regions):
-                print(f"   ✅ Region {idx+1}: Pos(x,y)=({region['x']}, {region['y']}) | Size(w,h)={region['w']}x{region['h']}")
+            # Thêm original_idx cho tất cả regions
+            for display_idx, region in enumerate(filtered_regions, start=1):
+                region['original_idx'] = display_idx
+                bottom_right_x = region['x'] + region['w']
+                bottom_right_y = region['y'] + region['h']
+                print(f"   ✅ Region {display_idx}: "
+                      f"TopLeft(x,y)=({region['x']}, {region['y']}) | "
+                      f"BottomRight(x,y)=({bottom_right_x}, {bottom_right_y}) | "
+                      f"Size(w,h)={region['w']}x{region['h']}")
 
-        # EXPORT PREVIEW IMAGE
+        # EXPORT PREVIEW IMAGE - SỬA ĐỔI: Truyền filtered_regions
         preview_path = None
         if req.export_preview:
             preview_path = export_preview_image(
                 req.video_path,
-                filtered_regions,
+                filtered_regions,  # Đã đúng, giữ nguyên
                 width,
                 height,
                 req.preview_output_dir
