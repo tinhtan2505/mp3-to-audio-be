@@ -434,13 +434,22 @@ def api_detect_text_regions(req: DetectTextRequest):
             for idx, region in enumerate(merged_regions):
                 # Kiểm tra Y position (CHƯA scaled)
                 if region['y'] < skip_threshold_y:
+                    # (Optional) Uncomment dòng dưới nếu muốn xem log các vùng bị bỏ qua
+                    # print(f"   ⏭️  Region {idx+1} SKIPPED: y={region['y']} < threshold={skip_threshold_y}")
                     continue
 
                 filtered_regions.append(region)
-                print(f"   ✅ Region {idx+1} KEPT (bottom 1/3): y={region['y']}, size={region['w']}x{region['h']}")
+
+                # --- CẬP NHẬT LOG HIỂN THỊ TỌA ĐỘ (X, Y) VÀ CHIỀU CAO (H) ---
+                print(f"   ✅ Region {idx+1} KEPT (bottom 1/3): "
+                      f"Pos(x,y)=({region['x']}, {region['y']}) | "
+                      f"Size(w,h)={region['w']}x{region['h']}")
         else:
             filtered_regions = merged_regions
             print("\n   ℹ️  Không lọc regions (giữ tất cả)")
+            # Log cho trường hợp giữ tất cả
+            for idx, region in enumerate(filtered_regions):
+                print(f"   ✅ Region {idx+1}: Pos(x,y)=({region['x']}, {region['y']}) | Size(w,h)={region['w']}x{region['h']}")
 
         # Chuyển đổi sang format output
         output_regions = []
