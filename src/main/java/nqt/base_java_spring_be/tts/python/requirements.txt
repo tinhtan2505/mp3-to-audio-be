@@ -8,6 +8,7 @@ edge-tts
 pysrt
 librosa
 soundfile
+pycparser
 numpy
 fastapi
 uvicorn
@@ -18,3 +19,5 @@ google.generativeai
 google.api_core
 openai
 deep_translator
+opencv-python
+pytesseract
