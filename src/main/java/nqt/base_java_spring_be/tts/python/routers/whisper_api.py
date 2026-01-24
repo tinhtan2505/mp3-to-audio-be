@@ -4,10 +4,9 @@ import pysrt
 import threading
 from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
-from google import genai
-from google.genai import types
+from google.genai.types import GenerateContentConfig
 from ai_core import AI_MODELS
-from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE, TRANS_DELAY_SECONDS_GEMINI
+from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE, TRANS_DELAY_SECONDS_GEMINI, SYSTEM_INSTRUCTION_TRANS_GEMINI
 from utils import Logger, get_timestamp_str, normalize_segment_time
 
 router = APIRouter()
@@ -29,26 +28,33 @@ def format_timestamp(seconds):
 
 
 def call_gemini_api(text_list):
-    """Gửi yêu cầu dịch danh sách dòng tới Gemini (không retry khi lỗi) - CẬP NHẬT API MỚI."""
-    if not AI_MODELS["gemini_model"]:
+    """Gửi yêu cầu dịch danh sách dòng tới Gemini (không retry khi lỗi) - CẬP NHẬT API v1.60.0"""
+    # SỬA: Đổi từ "gemini_model" sang "gemini_client"
+    client = AI_MODELS["gemini_client"]
+    if not client:
         return None
 
-    prompt_content = "Dịch danh sách các dòng thoại sau (giữ nguyên số lượng dòng):\n"
+    prompt_content = "Dịch danh sách các dòng thoại sau sang Tiếng Việt (giữ nguyên số lượng dòng):\n"
     for i, txt in enumerate(text_list):
         prompt_content += f"Line_{i}: {txt}\n"
 
     try:
         time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
-        # ✅ SỬ DỤNG API MỚI: google.genai
-        response = AI_MODELS["gemini_model"].models.generate_content(
-            model='models/gemini-2.0-flash-exp',  # hoặc 'models/gemini-2.5-flash'
+        # SỬA: Sử dụng đúng API v1.60.0
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
             contents=prompt_content,
-            config=types.GenerateContentConfig(
+            config=GenerateContentConfig(
                 temperature=0.1,
-                system_instruction="Bạn là dịch giả chuyên nghiệp Tiên Hiệp. Dịch sang tiếng Việt tự nhiên, giữ nguyên số lượng dòng."
+                system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
             )
         )
+
+        # Kiểm tra response có text
+        if not hasattr(response, 'text'):
+            print(f"      [Gemini Lỗi] Response không có text")
+            return None
 
         raw_text = response.text.strip()
         translated_lines = []
@@ -63,9 +69,11 @@ def call_gemini_api(text_list):
             if clean_line:
                 translated_lines.append(clean_line)
         return translated_lines
+
     except Exception as e:
         print(f"      [Gemini Lỗi] API thất bại: {e}")
         return None
+
 
 def translate_srt_file_simple(input_srt_path):
     """
@@ -74,7 +82,8 @@ def translate_srt_file_simple(input_srt_path):
     """
     translate_start = time.time()
 
-    if not AI_MODELS["gemini_model"]:
+    # SỬA: Đổi từ "gemini_model" sang "gemini_client"
+    if not AI_MODELS["gemini_client"]:
         print(f"   ⚠️  Bỏ qua dịch: Gemini chưa được cấu hình")
         return None
 
@@ -213,9 +222,9 @@ def api_whisper(req: WhisperRequest):
             base_filename = os.path.splitext(os.path.basename(path))[0].split('_')[0]
             timestamp_str = get_timestamp_str()
             output_files_list = []
-            translated_files_list = []  # Thread-safe list với lock
+            translated_files_list = []
             translation_lock = threading.Lock()
-            translation_threads = []  # Theo dõi các thread đang chạy
+            translation_threads = []
 
             # Tracking variables
             total_segments = 0
@@ -227,7 +236,7 @@ def api_whisper(req: WhisperRequest):
 
             # Tối ưu: sử dụng set cho lookup O(1)
             seen_texts = set()
-            last_texts = []  # Queue nhỏ để check lặp gần
+            last_texts = []
 
             # Thống kê chi tiết
             stats = {
@@ -313,7 +322,7 @@ def api_whisper(req: WhisperRequest):
                     if text_normalized in seen_texts or text in last_texts[-3:]:
                         stats['duplicates'] += 1
                         filtered_count += 1
-                        if stats['duplicates'] % 5 == 0:  # Log mỗi 5 duplicate
+                        if stats['duplicates'] % 5 == 0:
                             print(f"   ⚠️  Đã lọc {stats['duplicates']} câu trùng lặp...")
                         continue
 
@@ -326,7 +335,7 @@ def api_whisper(req: WhisperRequest):
                     # Cập nhật tracking
                     seen_texts.add(text_normalized)
                     last_texts.append(text)
-                    if len(last_texts) > 5:  # Giữ queue nhỏ
+                    if len(last_texts) > 5:
                         last_texts.pop(0)
 
                     # Ghi file với index nối tiếp toàn cục
@@ -362,8 +371,8 @@ def api_whisper(req: WhisperRequest):
                         print(f"      └─ Đường dẫn: {os.path.basename(current_file_path)}")
                         print(f"      └─ Thời gian: {elapsed:.1f}s\n")
 
-                        # === DỊCH FILE TRONG BACKGROUND (KHÔNG BLOCK WHISPER) ===
-                        if AI_MODELS["gemini_model"]:
+                        # === DỊCH FILE TRONG BACKGROUND (SỬA: gemini_client) ===
+                        if AI_MODELS["gemini_client"]:
                             thread = threading.Thread(
                                 target=translate_file_background,
                                 args=(current_file_path, translated_files_list, translation_lock),
@@ -372,7 +381,6 @@ def api_whisper(req: WhisperRequest):
                             thread.start()
                             translation_threads.append(thread)
                             print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(current_file_path)}\n")
-                        # === KẾT THÚC KHỞI TẠO DỊCH ===
 
                         # Mở file mới
                         chunk_index += 1
@@ -392,8 +400,8 @@ def api_whisper(req: WhisperRequest):
                     current_file_handle.close()
                     print(f"\n   ✅ File cuối cùng hoàn thành: {segments_in_current_file} câu")
 
-                    # === DỊCH FILE CUỐI CÙNG TRONG BACKGROUND ===
-                    if AI_MODELS["gemini_model"]:
+                    # === DỊCH FILE CUỐI CÙNG (SỬA: gemini_client) ===
+                    if AI_MODELS["gemini_client"]:
                         thread = threading.Thread(
                             target=translate_file_background,
                             args=(current_file_path, translated_files_list, translation_lock),
@@ -402,7 +410,6 @@ def api_whisper(req: WhisperRequest):
                         thread.start()
                         translation_threads.append(thread)
                         print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(current_file_path)}\n")
-                    # === KẾT THÚC KHỞI TẠO DỊCH ===
 
             except KeyboardInterrupt:
                 print(f"\n\n{'='*70}")
@@ -439,13 +446,13 @@ def api_whisper(req: WhisperRequest):
             elapsed = time.time() - start_w
             stats['avg_segment_length'] = stats['total_chars'] / total_segments if total_segments > 0 else 0
 
-            # Chờ tất cả translation threads hoàn thành (với timeout)
+            # Chờ tất cả translation threads hoàn thành
             print(f"\n{'='*70}")
             print(f"⏳ Đang chờ các tiến trình dịch hoàn thành...")
             print(f"{'='*70}\n")
 
             for i, thread in enumerate(translation_threads, 1):
-                thread.join(timeout=300)  # Timeout 5 phút mỗi thread
+                thread.join(timeout=300)
                 if thread.is_alive():
                     print(f"   ⚠️  Thread dịch {i} vẫn đang chạy (timeout)")
 

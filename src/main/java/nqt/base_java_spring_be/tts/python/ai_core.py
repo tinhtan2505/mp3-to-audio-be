@@ -1,4 +1,3 @@
-# ai_core.py
 import shutil
 import os
 import time
@@ -7,7 +6,7 @@ import torch
 import whisper
 from faster_whisper import WhisperModel
 from google import genai
-from google.genai import types
+from google.genai.types import GenerateContentConfig, GoogleSearch
 from openai import OpenAI
 from deep_translator import GoogleTranslator
 
@@ -18,7 +17,7 @@ from utils import Logger
 # 1.5. Kho chứa các Model AI (Global State)
 AI_MODELS = {
     "whisper": None,
-    "gemini_model": None,
+    "gemini_client": None,
     "ollama_client": None,
     "device": "cpu"
 }
@@ -69,68 +68,67 @@ def load_ai_models():
     except Exception as e:
         Logger.error("Lỗi tải Whisper", e)
 
-    # 2. Config Gemini
-    AI_MODELS["gemini_model"] = None # Reset trạng thái
+    # 2. Config Gemini - ĐÚNG CHO PHIÊN BẢN 1.60.0
+    AI_MODELS["gemini_client"] = None
 
     if GEMINI_API_KEYS and len(GEMINI_API_KEYS) > 0:
-        print(f"\n⏳ Đang khởi tạo Gemini (Có {len(GEMINI_API_KEYS)} key dự phòng)...")
+        print(f"\n⏳ Đang khởi tạo Gemini v1.60.0 (Có {len(GEMINI_API_KEYS)} key dự phòng)...")
 
         for index, key in enumerate(GEMINI_API_KEYS):
-            # Bỏ qua key rỗng hoặc không đúng định dạng cơ bản
             if not key or "AIza" not in key:
                 continue
 
             try:
-                # Mask key để in ra log cho gọn
                 masked_key = f"{key[:5]}...{key[-4:]}" if len(key) > 10 else "******"
                 print(f"   🔑 [Thử Key #{index+1}] {masked_key}")
 
+                # CÁCH ĐÚNG cho v1.60.0: Truyền api_key trực tiếp vào Client
                 client = genai.Client(api_key=key)
 
-                # Gán vào Global State và thoát vòng lặp ngay khi thành công
-                AI_MODELS["gemini_model"] = client
-                Logger.success(f"Gemini đã kết nối thành công với Key #{index+1}")
-                break
+                # Test kết nối bằng generate đơn giản
+                try:
+                    test_response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents='Hello, respond with just OK'
+                    )
+
+                    if test_response and hasattr(test_response, 'text'):
+                        print(f"      ✅ Test thành công: {test_response.text[:50]}")
+                        AI_MODELS["gemini_client"] = client
+                        Logger.success(f"Gemini đã kết nối thành công với Key #{index+1}")
+                        break
+                    else:
+                        print(f"      ❌ Phản hồi không hợp lệ")
+
+                except Exception as test_err:
+                    print(f"      ❌ Test thất bại: {str(test_err)[:100]}")
+                    continue
 
             except Exception as e:
-                # Nếu lỗi, log warning và tiếp tục vòng lặp (continue)
                 Logger.warning(f"⚠️ Key #{index+1} thất bại: {str(e)[:100]}... -> Đang chuyển Key tiếp theo.")
                 continue
 
-    # Kiểm tra cuối cùng
-    if not AI_MODELS["gemini_model"]:
+    if not AI_MODELS["gemini_client"]:
         Logger.error("❌ TẤT CẢ GEMINI KEY ĐỀU LỖI HOẶC DANH SÁCH TRỐNG.")
 
-    # # 3. Config Ollama
-    # print(f"\n⏳ Đang cấu hình Ollama Client ({OLLAMA_MODEL_NAME})...")
-    # try:
-    #     client = OpenAI(base_url=OLLAMA_BASE_URL, api_key=OLLAMA_API_KEY)
-    #     AI_MODELS["ollama_client"] = client
-    #     try:
-    #         client.models.list()
-    #         Logger.success(f"Ollama đã kết nối tại {OLLAMA_BASE_URL}")
-    #     except Exception:
-    #         Logger.warning("Không thể kết nối Ollama. Hãy chắc chắn app đang chạy.")
-    # except Exception as e:
-    #     Logger.error("Lỗi cấu hình Ollama", e)
-
-# --- CÁC HÀM XỬ LÝ DỊCH THUẬT (LOGIC CỐT LÕI) ---
+# --- CÁC HÀM XỬ LÝ DỊCH THUẬT ---
 
 def is_valid_translation(text):
-    """Kiểm tra xem bản dịch có đạt chất lượng cơ bản không."""
-    # Kiểm tra còn tiếng Trung
+    """Kiểm tra chất lượng bản dịch"""
     if re.search(r'[\u4e00-\u9fff]', text):
         return False, "Còn dính tiếng Trung"
-    # Kiểm tra tiếng Anh (các từ thông dụng)
     if re.search(r'\b(the|is|are|you|me|goods|too|looks|like|what|so|yes|no)\b', text, re.IGNORECASE):
         return False, "Còn dính tiếng Anh"
     return True, "Hợp lệ"
 
 def call_gemini_api(text_list):
-    """Gửi yêu cầu dịch danh sách dòng tới Gemini."""
-    if not AI_MODELS["gemini_model"]: return None
+    """Gọi Gemini API v1.60.0 để dịch batch"""
+    client = AI_MODELS["gemini_client"]
+    if not client:
+        print("   ❌ Gemini client chưa được khởi tạo")
+        return None
 
-    prompt_content = "Dịch danh sách các dòng thoại sau (giữ nguyên số lượng dòng):\n"
+    prompt_content = "Dịch danh sách các dòng thoại sau sang Tiếng Việt (giữ nguyên số lượng dòng):\n"
     for i, txt in enumerate(text_list):
         prompt_content += f"Line_{i}: {txt}\n"
 
@@ -138,33 +136,47 @@ def call_gemini_api(text_list):
     for attempt in range(retries):
         try:
             time.sleep(TRANS_DELAY_SECONDS_GEMINI)
-            response = AI_MODELS["gemini_model"].generate_content(
-                model='models/gemini-2.5-flash',  # Hoặc gemini-2.5-flash
+
+            # CÁCH GỌI ĐÚNG cho v1.60.0
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
                 contents=prompt_content,
-                config=types.GenerateContentConfig(
+                config=GenerateContentConfig(
                     temperature=0.1,
                     system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
                 )
             )
+
+            # Kiểm tra response có text không
+            if not hasattr(response, 'text'):
+                print(f"      [Gemini] Response không có text attribute")
+                continue
+
             raw_text = response.text.strip()
             translated_lines = []
 
-            # Phân tích kết quả trả về
             for line in raw_text.split('\n'):
                 clean_line = line.strip()
                 if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
                     clean_line = clean_line.split(":", 1)[1].strip()
                 elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
                     clean_line = clean_line.split(' ', 1)[1].strip()
-                if clean_line: translated_lines.append(clean_line)
+                if clean_line:
+                    translated_lines.append(clean_line)
+
             return translated_lines
+
         except Exception as e:
             print(f"      [Gemini Cảnh báo] Lỗi API (Lần {attempt+1}): {e}")
-            time.sleep(10)
+            if attempt < retries - 1:
+                time.sleep(10)
+            else:
+                print(f"      [Gemini] Đã thử {retries} lần, thất bại hoàn toàn")
+
     return None
 
 def call_ollama_api(text_list):
-    """Gửi yêu cầu dịch tới Ollama (Local LLM)."""
+    """Gọi Ollama API để dịch batch"""
     client = AI_MODELS["ollama_client"]
     if not client:
         print("   ❌ Ollama client chưa được khởi tạo.")
@@ -191,7 +203,8 @@ def call_ollama_api(text_list):
                 clean_line = line.strip()
                 if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
                     parts = clean_line.split(":", 1)
-                    if len(parts) > 1: translated_lines.append(parts[1].strip())
+                    if len(parts) > 1:
+                        translated_lines.append(parts[1].strip())
                 elif clean_line:
                     translated_lines.append(clean_line)
             return translated_lines
@@ -201,14 +214,14 @@ def call_ollama_api(text_list):
     return None
 
 def call_ollama_single_line(text, system_prompt):
-    """Dịch lại 1 dòng duy nhất bằng Ollama (Dùng cho Retry)."""
+    """Dịch 1 dòng bằng Ollama"""
     client = AI_MODELS["ollama_client"]
     try:
         response = client.chat.completions.create(
             model=OLLAMA_MODEL_NAME,
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Dịch dòng này sang Tiếng Việt Tiên Hiệp (Tuyệt đối không dùng tiếng Anh/Trung): {text}"}
+                {"role": "user", "content": f"Dịch dòng này sang Tiếng Việt Tiên Hiệp (không dùng tiếng Anh/Trung): {text}"}
             ],
             temperature=0.3,
             presence_penalty=1.1
@@ -218,10 +231,11 @@ def call_ollama_single_line(text, system_prompt):
         return text
 
 def process_batch_recursive(subs_slice, start_index):
-    """Thuật toán 'Chia để trị' cho Gemini: Nếu batch lỗi, chia đôi để xử lý lại."""
+    """Thuật toán chia để trị cho Gemini"""
     original_texts = [sub.text for sub in subs_slice]
     count = len(original_texts)
-    if count == 0: return []
+    if count == 0:
+        return []
 
     translated_results = call_gemini_api(original_texts)
     if translated_results and len(translated_results) == count:
@@ -238,47 +252,41 @@ def process_batch_recursive(subs_slice, start_index):
     return part1 + part2
 
 def process_batch_recursive_ollama(subs_slice, start_index):
-    """
-    Xử lý Batch Ollama với LOG CHI TIẾT
-    """
+    """Xử lý batch Ollama với retry"""
     original_texts = [sub.text for sub in subs_slice]
     count = len(original_texts)
-    if count == 0: return []
+    if count == 0:
+        return []
 
-    # 1. Gọi Batch
     translated_results = call_ollama_api(original_texts)
     if not translated_results or len(translated_results) != count:
         translated_results = [None] * count
 
     final_results = []
 
-    # 2. Duyệt từng dòng để in Log & Retry
     for i, (orig, trans) in enumerate(zip(original_texts, translated_results)):
         current_text = trans
         real_idx = start_index + i
 
-        # Nếu batch null, dịch lẻ
         if current_text is None:
             current_text = call_ollama_single_line(orig, SYSTEM_INSTRUCTION_TRANS)
 
-        # Retry Loop
         MAX_RETRIES = 3
         attempt = 0
         while attempt < MAX_RETRIES:
             is_ok, reason = is_valid_translation(current_text)
-            if is_ok: break
+            if is_ok:
+                break
             attempt += 1
-            # Log Retry
             print(f"      🔸 [Ollama Retry {attempt}] #{real_idx}: Lỗi '{reason}' -> Thử lại...")
             retry_prompt = f"{SYSTEM_INSTRUCTION_TRANS}\nLỗi trước đó: '{current_text}' ({reason}). Dịch lại:"
             current_text = call_ollama_single_line(orig, retry_prompt)
 
-        # Clean format
         if current_text and ":" in current_text:
             parts = current_text.split(":", 1)
-            if len(parts) > 1: current_text = parts[1].strip()
+            if len(parts) > 1:
+                current_text = parts[1].strip()
 
-        # LOG KẾT QUẢ OLLAMA
         is_ok_final, reason_final = is_valid_translation(current_text)
         if is_ok_final:
             print(f"   🟢 [Ollama OK] #{real_idx}: {current_text}")
@@ -290,13 +298,13 @@ def process_batch_recursive_ollama(subs_slice, start_index):
     return final_results
 
 def call_gemini_fix_lines(failed_map):
-    """
-    Sửa lỗi bằng Gemini -> Fallback Google DeepTranslator
-    Có LOG CHI TIẾT
-    """
-    if not failed_map: return {}
+    """Sửa lỗi bằng Gemini v1.60.0 -> Fallback Google Translator"""
+    if not failed_map:
+        return {}
+
+    client = AI_MODELS["gemini_client"]
     fallback_translator = GoogleTranslator(source='auto', target='vi')
-    gemini_active = bool(AI_MODELS["gemini_model"])
+    gemini_active = bool(client)
 
     print(f"\n🚑 [BƯỚC 2: CỨU HỘ] Xử lý {len(failed_map)} dòng lỗi...")
 
@@ -310,38 +318,40 @@ def call_gemini_fix_lines(failed_map):
         # --- GEMINI PHASE ---
         if gemini_active:
             try:
-                prompt = "Bạn là Dịch giả Tiên Hiệp. Hãy dịch chính xác các dòng sau sang Tiếng Việt (giữ nguyên ID):\n" + "\n".join([f"Line_{idx}: {txt}" for idx, txt in chunk])
+                prompt = "Bạn là Dịch giả Tiên Hiệp. Hãy dịch chính xác các dòng sau sang Tiếng Việt (giữ nguyên ID):\n"
+                prompt += "\n".join([f"Line_{idx}: {txt}" for idx, txt in chunk])
                 time.sleep(2)
-                res = AI_MODELS["gemini_model"].generate_content(
-                    model='models/gemini-2.5-flash',
+
+                res = client.models.generate_content(
+                    model='gemini-2.5-flash',
                     contents=prompt,
-                    config=types.GenerateContentConfig(temperature=0.1)
+                    config=GenerateContentConfig(temperature=0.1)
                 )
 
-                for line in res.text.strip().split('\n'):
-                    match = re.match(r"Line_(\d+):\s*(.*)", line.strip())
-                    if match:
-                        idx_str, content = match.groups()
-                        idx = int(idx_str)
-                        fixed_results[idx] = content.strip()
-                        # LOG CHI TIẾT GEMINI
-                        print(f"      ✨ [Gemini Fix] #{idx}: {content.strip()}")
+                if hasattr(res, 'text'):
+                    for line in res.text.strip().split('\n'):
+                        match = re.match(r"Line_(\d+):\s*(.*)", line.strip())
+                        if match:
+                            idx_str, content = match.groups()
+                            idx = int(idx_str)
+                            fixed_results[idx] = content.strip()
+                            print(f"      ✨ [Gemini Fix] #{idx}: {content.strip()}")
 
             except Exception as e:
                 print(f"      ❌ GEMINI SẬP: {str(e)[:50]}... -> Chuyển Google")
                 gemini_active = False
 
-        # --- GOOGLE PHASE (Khi Gemini sập hoặc lỗi) ---
+        # --- GOOGLE PHASE ---
         if not gemini_active:
             for idx, text in chunk:
-                if idx not in fixed_results: # Chỉ dịch nếu Gemini chưa xong
+                if idx not in fixed_results:
                     try:
                         translated = fallback_translator.translate(text)
                         fixed_results[idx] = translated
                         print(f"      🌍 [Google Fix] #{idx}: {translated}")
                         time.sleep(0.2)
                     except Exception:
-                        fixed_results[idx] = text # Cùng đường
+                        fixed_results[idx] = text
                         print(f"      💀 [Google Fail] #{idx}: Giữ nguyên")
 
     return fixed_results

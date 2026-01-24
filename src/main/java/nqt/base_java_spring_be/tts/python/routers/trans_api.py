@@ -23,18 +23,23 @@ def api_translate_gemini(req: TranslateRequest):
     Logger.section("DỊCH THUẬT GEMINI")
     print(f"   • Đầu vào: {req.input_srt_path}")
 
-    if not AI_MODELS["gemini_model"]:
+    # SỬA: Đổi từ "gemini_model" sang "gemini_client"
+    if not AI_MODELS["gemini_client"]:
         raise HTTPException(500, "Gemini chưa được cấu hình Key!")
 
     try:
         input_path = os.path.abspath(req.input_srt_path)
-        if not os.path.exists(input_path): raise FileNotFoundError(f"Không tìm thấy: {input_path}")
+        if not os.path.exists(input_path):
+            raise FileNotFoundError(f"Không tìm thấy: {input_path}")
 
         dir_name, base_name = os.path.split(input_path)
         output_path = os.path.join(dir_name, f"{os.path.splitext(base_name)[0]}_vi_TienHiep.srt")
 
-        try: subs = pysrt.open(input_path)
-        except: subs = pysrt.open(input_path, encoding='utf-8')
+        try:
+            subs = pysrt.open(input_path)
+        except:
+            subs = pysrt.open(input_path, encoding='utf-8')
+
         total_subs = len(subs)
         print(f"   📚 Tổng số dòng thoại: {total_subs}")
 
@@ -56,6 +61,7 @@ def api_translate_gemini(req: TranslateRequest):
         elapsed = time.time() - start_time
         Logger.success("DỊCH GEMINI HOÀN TẤT", elapsed)
         return {"status": "success", "output_file": output_path, "total_lines": total_subs}
+
     except Exception as e:
         Logger.error("Lỗi Dịch Gemini", e)
         raise HTTPException(500, str(e))
