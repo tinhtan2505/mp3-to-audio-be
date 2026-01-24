@@ -4,9 +4,9 @@ import lombok.Data;
 
 @Data
 public class MixVideoRequest {
-    private String videoInput;   // Đường dẫn video gốc
-    private String instrumental; // Đường dẫn nhạc nền
-    private String voiceDub;     // Đường dẫn giọng đọc
+    private String videoInput;
+    private String instrumental;
+    private String voiceDub;
     private Double musicVolume;
     private Double voiceVolume;
     private Double duckingRatio;
@@ -17,4 +17,5 @@ public class MixVideoRequest {
     private Integer logoY;
     private Integer logoW;
     private Integer logoH;
+    private boolean crop = false;
 }

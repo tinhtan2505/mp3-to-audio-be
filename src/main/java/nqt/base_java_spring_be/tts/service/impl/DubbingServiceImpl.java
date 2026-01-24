@@ -29,10 +29,13 @@ public class DubbingServiceImpl implements DubbingService {
     @Value("${app.tts.python-mix-url}")
     private String pythonMixUrl;
 
-    @Value("${app.tts.python-translate-url}") // Cần thêm key này vào file cấu hình
+    @Value("${app.tts.python-crop-url}")
+    private String pythonCropUrl;
+
+    @Value("${app.tts.python-translate-url}")
     private String pythonTranslateUrl;
 
-    @Value("${app.tts.python-detect-text-url}") // Thêm key này vào application.properties
+    @Value("${app.tts.python-detect-text-url}")
     private String pythonDetectTextUrl;
 
     public DubbingServiceImpl() {
@@ -201,7 +204,7 @@ public class DubbingServiceImpl implements DubbingService {
 
             // 3. Gọi Python (Port 8003)
             ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
-                    pythonMixUrl,
+                    req.isCrop() ? pythonCropUrl : pythonMixUrl,
                     org.springframework.http.HttpMethod.POST,
                     entity,
                     new ParameterizedTypeReference<Map<String, Object>>() {}
