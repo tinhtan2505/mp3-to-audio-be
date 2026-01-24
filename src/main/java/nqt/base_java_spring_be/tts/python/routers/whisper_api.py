@@ -5,11 +5,104 @@ import threading
 from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
 from google.genai.types import GenerateContentConfig
+from google import genai
 from ai_core import AI_MODELS
-from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE, TRANS_DELAY_SECONDS_GEMINI, SYSTEM_INSTRUCTION_TRANS_GEMINI
+from config import (
+    WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE,
+    TRANS_DELAY_SECONDS_GEMINI, SYSTEM_INSTRUCTION_TRANS_GEMINI,
+    GEMINI_API_KEYS
+)
 from utils import Logger, get_timestamp_str, normalize_segment_time
 
 router = APIRouter()
+
+# === GLOBAL STATE CHO KEY ROTATION ===
+GEMINI_STATE = {
+    'current_key_index': 0,
+    'failed_keys': set(),
+    'lock': threading.Lock()
+}
+
+
+def get_next_gemini_client():
+    """
+    Lấy Gemini client với key tiếp theo (skip các key đã fail)
+    Trả về: (client, key_index) hoặc (None, -1)
+    """
+    with GEMINI_STATE['lock']:
+        if not GEMINI_API_KEYS:
+            return None, -1
+
+        start_index = GEMINI_STATE['current_key_index']
+        attempts = 0
+        total_keys = len(GEMINI_API_KEYS)
+
+        while attempts < total_keys:
+            current_index = (start_index + attempts) % total_keys
+
+            # Skip key đã fail
+            if current_index in GEMINI_STATE['failed_keys']:
+                attempts += 1
+                continue
+
+            key = GEMINI_API_KEYS[current_index]
+            if not key or "AIza" not in key:
+                GEMINI_STATE['failed_keys'].add(current_index)
+                attempts += 1
+                continue
+
+            try:
+                client = genai.Client(api_key=key)
+                GEMINI_STATE['current_key_index'] = current_index
+                return client, current_index
+            except Exception as e:
+                print(f"      ⚠️  Key #{current_index+1} khởi tạo thất bại: {str(e)[:50]}")
+                GEMINI_STATE['failed_keys'].add(current_index)
+                attempts += 1
+
+        return None, -1
+
+
+def mark_key_as_failed(key_index):
+    """Đánh dấu key đã fail và chuyển sang key tiếp theo"""
+    with GEMINI_STATE['lock']:
+        GEMINI_STATE['failed_keys'].add(key_index)
+        print(f"      ❌ Key #{key_index+1} đã bị đánh dấu thất bại (quota/error)")
+
+
+def rotate_to_next_key():
+    """Chuyển sang key tiếp theo"""
+    with GEMINI_STATE['lock']:
+        if not GEMINI_API_KEYS:
+            return None, -1
+
+        current = GEMINI_STATE['current_key_index']
+        total_keys = len(GEMINI_API_KEYS)
+
+        # Thử tối đa tất cả các key
+        for offset in range(1, total_keys + 1):
+            next_index = (current + offset) % total_keys
+
+            if next_index in GEMINI_STATE['failed_keys']:
+                continue
+
+            key = GEMINI_API_KEYS[next_index]
+            if not key or "AIza" not in key:
+                GEMINI_STATE['failed_keys'].add(next_index)
+                continue
+
+            try:
+                client = genai.Client(api_key=key)
+                GEMINI_STATE['current_key_index'] = next_index
+                masked = f"{key[:5]}...{key[-4:]}"
+                print(f"\n      🔄 Đã chuyển sang Key #{next_index+1}: {masked}")
+                return client, next_index
+            except Exception as e:
+                print(f"      ⚠️  Key #{next_index+1} khởi tạo thất bại: {str(e)[:50]}")
+                GEMINI_STATE['failed_keys'].add(next_index)
+                continue
+
+        return None, -1
 
 
 def write_srt_line(file_handle, index, start, end, text):
@@ -28,21 +121,32 @@ def format_timestamp(seconds):
 
 
 def call_gemini_api(text_list):
-    """Gửi yêu cầu dịch danh sách dòng tới Gemini (không retry khi lỗi) - CẬP NHẬT API v1.60.0"""
-    # SỬA: Đổi từ "gemini_model" sang "gemini_client"
-    client = AI_MODELS["gemini_client"]
-    if not client:
+    """
+    Gửi yêu cầu dịch KHÔNG retry - chỉ gọi 1 lần
+    Nếu lỗi 429 thì rotate key và return None ngay
+    """
+    if not GEMINI_API_KEYS:
         return None
 
     prompt_content = "Dịch danh sách các dòng thoại sau sang Tiếng Việt (giữ nguyên số lượng dòng):\n"
     for i, txt in enumerate(text_list):
         prompt_content += f"Line_{i}: {txt}\n"
 
+    current_client = AI_MODELS.get("gemini_client")
+    current_key_index = GEMINI_STATE['current_key_index']
+
     try:
+        # Nếu client chưa có, lấy client mới
+        if not current_client:
+            current_client, current_key_index = get_next_gemini_client()
+            if not current_client:
+                print(f"      ❌ Không còn key khả dụng")
+                return None
+            AI_MODELS["gemini_client"] = current_client
+
         time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
-        # SỬA: Sử dụng đúng API v1.60.0
-        response = client.models.generate_content(
+        response = current_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt_content,
             config=GenerateContentConfig(
@@ -51,15 +155,13 @@ def call_gemini_api(text_list):
             )
         )
 
-        # Kiểm tra response có text
         if not hasattr(response, 'text'):
-            print(f"      [Gemini Lỗi] Response không có text")
+            print(f"      ⚠️  Response không có text")
             return None
 
         raw_text = response.text.strip()
         translated_lines = []
 
-        # Phân tích kết quả trả về
         for line in raw_text.split('\n'):
             clean_line = line.strip()
             if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
@@ -68,23 +170,39 @@ def call_gemini_api(text_list):
                 clean_line = clean_line.split(' ', 1)[1].strip()
             if clean_line:
                 translated_lines.append(clean_line)
+
         return translated_lines
 
     except Exception as e:
-        print(f"      [Gemini Lỗi] API thất bại: {e}")
+        error_msg = str(e).lower()
+
+        # Phát hiện lỗi 429 (quota exceeded) -> rotate key
+        if "429" in error_msg or "quota" in error_msg or "resource_exhausted" in error_msg:
+            print(f"      ⚠️  Key #{current_key_index+1} hết quota (429) - Đánh dấu key fail")
+            mark_key_as_failed(current_key_index)
+
+            # Rotate sang key tiếp theo cho lần gọi sau
+            next_client, next_key_index = rotate_to_next_key()
+            if next_client:
+                AI_MODELS["gemini_client"] = next_client
+            else:
+                print(f"      ❌ TẤT CẢ KEY ĐỀU HẾT QUOTA")
+
+            return None
+
+        # Các lỗi khác
+        print(f"      ❌ Gemini API lỗi: {str(e)[:100]}")
         return None
 
 
 def translate_srt_file_simple(input_srt_path):
     """
-    Dịch file SRT sang tiếng Việt - PHIÊN BẢN ĐƠN GIẢN HÓA
-    Không dừng khi lệch dòng, chỉ log cảnh báo và giữ nguyên text gốc
+    Dịch file SRT sang tiếng Việt với auto key rotation
     """
     translate_start = time.time()
 
-    # SỬA: Đổi từ "gemini_model" sang "gemini_client"
-    if not AI_MODELS["gemini_client"]:
-        print(f"   ⚠️  Bỏ qua dịch: Gemini chưa được cấu hình")
+    if not GEMINI_API_KEYS:
+        print(f"   ⚠️  Bỏ qua dịch: Không có Gemini API key")
         return None
 
     try:
@@ -106,6 +224,7 @@ def translate_srt_file_simple(input_srt_path):
         total_subs = len(subs)
         print(f"   📚 Tổng số dòng thoại: {total_subs}")
         print(f"   📦 Kích thước lô: {TRANS_BATCH_SIZE} dòng/lô")
+        print(f"   🔑 Số key khả dụng: {len(GEMINI_API_KEYS) - len(GEMINI_STATE['failed_keys'])}/{len(GEMINI_API_KEYS)}")
         print(f"   ⏱️  Thời gian bắt đầu: {time.strftime('%H:%M:%S')}\n")
 
         # Thống kê
@@ -125,17 +244,15 @@ def translate_srt_file_simple(input_srt_path):
             # Lấy text gốc
             original_texts = [sub.text for sub in current_batch]
 
-            # Gọi API dịch
+            # Gọi API dịch (có auto retry + key rotation)
             translated_texts = call_gemini_api(original_texts)
 
             # Xử lý kết quả
             if translated_texts is None:
-                # API thất bại hoàn toàn
                 print(f"      ⚠️  LỖI API: Giữ nguyên {batch_size} dòng gốc")
                 total_failed += batch_size
                 has_errors = True
             elif len(translated_texts) != batch_size:
-                # Lệch số lượng dòng
                 print(f"      ⚠️  LỆCH DÒNG: Nhận {len(translated_texts)}/{batch_size} dòng - Giữ nguyên text gốc")
                 total_mismatched += batch_size
                 has_errors = True
@@ -166,6 +283,7 @@ def translate_srt_file_simple(input_srt_path):
         print(f"   ✓ Dịch thành công: {total_translated}")
         print(f"   ⚠️  Lỗi API: {total_failed}")
         print(f"   ⚠️  Lệch dòng: {total_mismatched}")
+        print(f"   🔑 Key đã dùng: {GEMINI_STATE['current_key_index']+1}/{len(GEMINI_API_KEYS)}")
         print(f"   ⏱️  Thời gian dịch: {translate_elapsed:.2f}s ({translate_elapsed/60:.1f} phút)")
         if total_translated > 0:
             print(f"   ⚡ Tốc độ: {total_translated/(translate_elapsed/60):.1f} dòng/phút")
@@ -213,6 +331,11 @@ def api_whisper(req: WhisperRequest):
         print(f"   📂 Đầu vào: {os.path.basename(path)} ({os.path.getsize(path) / (1024*1024):.2f} MB)")
         print(f"   ⚙️  Chế độ: Streaming thời gian thực + Tự động chia ({MAX_SEGMENTS_PER_FILE} câu/file)")
         print(f"   🔧 Engine: {WHISPER_BACKEND}")
+
+        # Reset failed keys trước mỗi session mới
+        with GEMINI_STATE['lock']:
+            GEMINI_STATE['failed_keys'].clear()
+            print(f"   🔑 Đã reset danh sách key - Sẵn sàng dùng {len(GEMINI_API_KEYS)} key")
 
         start_w = time.time()
 
@@ -371,8 +494,8 @@ def api_whisper(req: WhisperRequest):
                         print(f"      └─ Đường dẫn: {os.path.basename(current_file_path)}")
                         print(f"      └─ Thời gian: {elapsed:.1f}s\n")
 
-                        # === DỊCH FILE TRONG BACKGROUND (SỬA: gemini_client) ===
-                        if AI_MODELS["gemini_client"]:
+                        # DỊCH FILE TRONG BACKGROUND
+                        if GEMINI_API_KEYS:
                             thread = threading.Thread(
                                 target=translate_file_background,
                                 args=(current_file_path, translated_files_list, translation_lock),
@@ -400,8 +523,8 @@ def api_whisper(req: WhisperRequest):
                     current_file_handle.close()
                     print(f"\n   ✅ File cuối cùng hoàn thành: {segments_in_current_file} câu")
 
-                    # === DỊCH FILE CUỐI CÙNG (SỬA: gemini_client) ===
-                    if AI_MODELS["gemini_client"]:
+                    # DỊCH FILE CUỐI CÙNG
+                    if GEMINI_API_KEYS:
                         thread = threading.Thread(
                             target=translate_file_background,
                             args=(current_file_path, translated_files_list, translation_lock),
@@ -477,6 +600,12 @@ def api_whisper(req: WhisperRequest):
             print(f"   • Tốc độ xử lý: {total_segments/(elapsed/60):.1f} câu/phút")
             print(f"   • Thời lượng audio: ~{stats['total_duration']:.1f}s")
             print(f"   • Hệ số thời gian thực: {stats['total_duration']/elapsed:.2f}x")
+            print(f"\n🔑 GEMINI KEY USAGE:")
+            print(f"   • Key cuối cùng: #{GEMINI_STATE['current_key_index']+1}/{len(GEMINI_API_KEYS) if GEMINI_API_KEYS else 0}")
+            print(f"   • Key đã fail: {len(GEMINI_STATE['failed_keys'])}")
+            if GEMINI_STATE['failed_keys']:
+                failed_list = ', '.join([f"#{i+1}" for i in sorted(GEMINI_STATE['failed_keys'])])
+                print(f"   • Danh sách fail: {failed_list}")
             print(f"\n📁 CÁC FILE ĐẦU RA:")
             print(f"   === File gốc (Tiếng Trung) ===")
             for i, f in enumerate(output_files_list, 1):
@@ -507,6 +636,11 @@ def api_whisper(req: WhisperRequest):
                     "avg_length": round(stats['avg_segment_length'], 1),
                     "audio_duration": round(stats['total_duration'], 1),
                     "realtime_factor": round(stats['total_duration']/elapsed, 2)
+                },
+                "gemini_stats": {
+                    "total_keys": len(GEMINI_API_KEYS) if GEMINI_API_KEYS else 0,
+                    "failed_keys": len(GEMINI_STATE['failed_keys']),
+                    "last_key_used": GEMINI_STATE['current_key_index'] + 1 if GEMINI_API_KEYS else 0
                 }
             }
         else:
