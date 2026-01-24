@@ -6,7 +6,8 @@ import re
 import torch
 import whisper
 from faster_whisper import WhisperModel
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from openai import OpenAI
 from deep_translator import GoogleTranslator
 
@@ -69,18 +70,36 @@ def load_ai_models():
         Logger.error("Lỗi tải Whisper", e)
 
     # 2. Config Gemini
-    if GEMINI_API_KEY and "AIza" in GEMINI_API_KEY:
-        try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            AI_MODELS["gemini_model"] = genai.GenerativeModel(
-                model_name='models/gemini-2.5-flash',
-                system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
-            )
-            Logger.success("Gemini API đã sẵn sàng")
-        except Exception as e:
-            Logger.warning(f"Lỗi cấu hình Gemini: {e}")
-    else:
-        Logger.warning("⚠️ Chưa có GEMINI_API_KEY hợp lệ.")
+    AI_MODELS["gemini_model"] = None # Reset trạng thái
+
+    if GEMINI_API_KEYS and len(GEMINI_API_KEYS) > 0:
+        print(f"\n⏳ Đang khởi tạo Gemini (Có {len(GEMINI_API_KEYS)} key dự phòng)...")
+
+        for index, key in enumerate(GEMINI_API_KEYS):
+            # Bỏ qua key rỗng hoặc không đúng định dạng cơ bản
+            if not key or "AIza" not in key:
+                continue
+
+            try:
+                # Mask key để in ra log cho gọn
+                masked_key = f"{key[:5]}...{key[-4:]}" if len(key) > 10 else "******"
+                print(f"   🔑 [Thử Key #{index+1}] {masked_key}")
+
+                client = genai.Client(api_key=key)
+
+                # Gán vào Global State và thoát vòng lặp ngay khi thành công
+                AI_MODELS["gemini_model"] = client
+                Logger.success(f"Gemini đã kết nối thành công với Key #{index+1}")
+                break
+
+            except Exception as e:
+                # Nếu lỗi, log warning và tiếp tục vòng lặp (continue)
+                Logger.warning(f"⚠️ Key #{index+1} thất bại: {str(e)[:100]}... -> Đang chuyển Key tiếp theo.")
+                continue
+
+    # Kiểm tra cuối cùng
+    if not AI_MODELS["gemini_model"]:
+        Logger.error("❌ TẤT CẢ GEMINI KEY ĐỀU LỖI HOẶC DANH SÁCH TRỐNG.")
 
     # # 3. Config Ollama
     # print(f"\n⏳ Đang cấu hình Ollama Client ({OLLAMA_MODEL_NAME})...")
@@ -120,8 +139,12 @@ def call_gemini_api(text_list):
         try:
             time.sleep(TRANS_DELAY_SECONDS_GEMINI)
             response = AI_MODELS["gemini_model"].generate_content(
-                prompt_content,
-                generation_config=genai.types.GenerationConfig(temperature=0.1)
+                model='models/gemini-2.5-flash',  # Hoặc gemini-2.5-flash
+                contents=prompt_content,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
+                )
             )
             raw_text = response.text.strip()
             translated_lines = []
@@ -289,7 +312,11 @@ def call_gemini_fix_lines(failed_map):
             try:
                 prompt = "Bạn là Dịch giả Tiên Hiệp. Hãy dịch chính xác các dòng sau sang Tiếng Việt (giữ nguyên ID):\n" + "\n".join([f"Line_{idx}: {txt}" for idx, txt in chunk])
                 time.sleep(2)
-                res = AI_MODELS["gemini_model"].generate_content(prompt, generation_config=genai.types.GenerationConfig(temperature=0.1))
+                res = AI_MODELS["gemini_model"].generate_content(
+                    model='models/gemini-2.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(temperature=0.1)
+                )
 
                 for line in res.text.strip().split('\n'):
                     match = re.match(r"Line_(\d+):\s*(.*)", line.strip())

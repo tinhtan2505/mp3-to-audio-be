@@ -4,7 +4,8 @@ import pysrt
 import threading
 from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from ai_core import AI_MODELS
 from config import WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE, TRANS_DELAY_SECONDS_GEMINI
 from utils import Logger, get_timestamp_str, normalize_segment_time
@@ -28,7 +29,7 @@ def format_timestamp(seconds):
 
 
 def call_gemini_api(text_list):
-    """Gửi yêu cầu dịch danh sách dòng tới Gemini (không retry khi lỗi)."""
+    """Gửi yêu cầu dịch danh sách dòng tới Gemini (không retry khi lỗi) - CẬP NHẬT API MỚI."""
     if not AI_MODELS["gemini_model"]:
         return None
 
@@ -38,10 +39,17 @@ def call_gemini_api(text_list):
 
     try:
         time.sleep(TRANS_DELAY_SECONDS_GEMINI)
-        response = AI_MODELS["gemini_model"].generate_content(
-            prompt_content,
-            generation_config=genai.types.GenerationConfig(temperature=0.1)
+
+        # ✅ SỬ DỤNG API MỚI: google.genai
+        response = AI_MODELS["gemini_model"].models.generate_content(
+            model='models/gemini-2.0-flash-exp',  # hoặc 'models/gemini-2.5-flash'
+            contents=prompt_content,
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                system_instruction="Bạn là dịch giả chuyên nghiệp Tiên Hiệp. Dịch sang tiếng Việt tự nhiên, giữ nguyên số lượng dòng."
+            )
         )
+
         raw_text = response.text.strip()
         translated_lines = []
 
@@ -138,7 +146,7 @@ def translate_srt_file_simple(input_srt_path):
             error_path = output_path.replace('.srt', '_[ERROR].srt')
             os.rename(output_path, error_path)
             output_path = error_path
-            
+
         translate_elapsed = time.time() - translate_start
 
         print(f"\n{'='*70}")
