@@ -41,6 +41,8 @@ def api_mix(req: MixRequest):
     start_time = time.time()
     Logger.section("GHÉP VIDEO (FFMPEG)")
 
+    extracted_audio_temp = None  # Track temporary file for cleanup
+
     try:
         vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
 
@@ -49,7 +51,28 @@ def api_mix(req: MixRequest):
         if not os.path.exists(voice): raise FileNotFoundError(f"Thiếu Voice: {voice}")
 
         m_vol = req.music_volume if req.music_volume is not None else DEFAULT_MUSIC_VOLUME
-        has_music = (m_vol > 0) and os.path.exists(inst)
+
+        # Xử lý trường hợp nhạc nền là video gốc
+        if inst and os.path.normpath(inst) == os.path.normpath(vid):
+            print("   🎵 Phát hiện nhạc nền = video gốc, tự động trích xuất audio...")
+            video_dir = os.path.dirname(vid)
+            extracted_audio = os.path.join(video_dir, f"extracted_audio_{get_timestamp_str()}.mp3")
+            extracted_audio_temp = extracted_audio  # Save for cleanup
+
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", vid, "-vn", "-acodec", "libmp3lame",
+                     "-b:a", "192k", extracted_audio],
+                    capture_output=True, text=True, check=True
+                )
+                inst = extracted_audio
+                print(f"   ✅ Đã trích xuất audio: {extracted_audio}")
+            except subprocess.CalledProcessError as e:
+                print(f"   ⚠️  Không trích xuất được audio từ video gốc: {e}")
+                inst = None
+                extracted_audio_temp = None
+
+        has_music = (m_vol > 0) and inst and os.path.exists(inst)
 
         video_dir = os.path.dirname(vid)
         out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
@@ -236,6 +259,14 @@ def api_mix(req: MixRequest):
         total_time = time.time() - start_time
         render_time = time.time() - render_start
 
+        # Cleanup temporary extracted audio
+        if extracted_audio_temp and os.path.exists(extracted_audio_temp):
+            try:
+                os.remove(extracted_audio_temp)
+                print(f"   🗑️  Đã xóa file audio tạm: {extracted_audio_temp}")
+            except Exception as e:
+                print(f"   ⚠️  Không xóa được file tạm: {e}")
+
         Logger.success("XỬ LÝ THÀNH CÔNG!", total_time)
         print(f"   ⏱️  Thời gian render: {render_time:.2f}s")
         print(f"   ⏱️  Tổng thời gian: {total_time:.2f}s")
@@ -254,7 +285,23 @@ def api_mix(req: MixRequest):
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr if isinstance(e.stderr, str) else str(e)
         print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-10:]))
+
+        # Cleanup on error
+        if extracted_audio_temp and os.path.exists(extracted_audio_temp):
+            try:
+                os.remove(extracted_audio_temp)
+            except:
+                pass
+
         raise HTTPException(500, "Lỗi khi chạy FFmpeg")
     except Exception as e:
         Logger.error("Lỗi hệ thống", e)
+
+        # Cleanup on error
+        if extracted_audio_temp and os.path.exists(extracted_audio_temp):
+            try:
+                os.remove(extracted_audio_temp)
+            except:
+                pass
+
         raise HTTPException(500, str(e))

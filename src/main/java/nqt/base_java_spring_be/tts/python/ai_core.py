@@ -82,11 +82,12 @@ def load_ai_models():
                 masked_key = f"{key[:5]}...{key[-4:]}" if len(key) > 10 else "******"
                 print(f"   🔑 [Thử Key #{index+1}] {masked_key}")
 
-                # CÁCH ĐÚNG cho v1.60.0: Truyền api_key trực tiếp vào Client
                 client = genai.Client(api_key=key)
 
                 AI_MODELS["gemini_client"] = client
                 Logger.success(f"Gemini đã kết nối thành công với Key #{index+1}")
+
+                break
 
             except Exception as e:
                 Logger.warning(f"⚠️ Key #{index+1} thất bại: {str(e)[:100]}... -> Đang chuyển Key tiếp theo.")
