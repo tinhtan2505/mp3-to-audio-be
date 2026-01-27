@@ -791,6 +791,82 @@ def api_whisper(req: WhisperRequest):
                 if thread.is_alive():
                     print(f"   ⚠️  Thread {i} vẫn đang chạy (timeout)")
 
+            # ========== GHI FILE TỔNG (MERGED FILE) ==========
+            merged_file_path = None
+            if translated_files_list:
+                try:
+                    with translation_lock:
+                        # Sắp xếp các file theo thứ tự part01, part02, ...
+                        sorted_files = sorted(translated_files_list, key=lambda x: x)
+
+                    # Lọc ra các file SUCCESS (không có [ERROR])
+                    success_files = [f for f in sorted_files if '[ERROR]' not in f]
+                    error_files = [f for f in sorted_files if '[ERROR]' in f]
+
+                    if success_files:
+                        print(f"\n{'='*70}")
+                        print(f"📚 BẮT ĐẦU GHI FILE TỔNG (MERGED)")
+                        print(f"{'='*70}")
+                        print(f"   📊 Tổng số file dịch: {len(sorted_files)}")
+                        print(f"   ✅ File thành công: {len(success_files)}")
+                        if error_files:
+                            print(f"   ❌ File lỗi (bỏ qua): {len(error_files)}")
+                            for ef in error_files:
+                                print(f"      • {os.path.basename(ef)}")
+
+                        # Tạo tên file tổng: video_cn_20260127_114537_vi_FULL.srt
+                        base_name = os.path.basename(success_files[0])
+                        # Loại bỏ _part01_vi.srt để lấy base
+                        merged_name = re.sub(r'_part\d+_vi\.srt$', '_vi_FULL.srt', base_name)
+                        merged_file_path = os.path.join(out_dir, merged_name)
+
+                        print(f"   📝 File đầu ra: {merged_name}\n")
+
+                        # Merge CHỈ các file SUCCESS - GIỮ NGUYÊN INDEX GỐC
+                        all_subs = pysrt.SubRipFile()
+
+                        for i, vi_file in enumerate(success_files, 1):
+                            print(f"   ⚡ Đang đọc file {i}/{len(success_files)}: {os.path.basename(vi_file)}")
+
+                            try:
+                                current_subs = pysrt.open(vi_file, encoding='utf-8')
+                            except:
+                                current_subs = pysrt.open(vi_file)
+
+                            # Lấy range index từ file này
+                            if current_subs:
+                                first_idx = current_subs[0].index
+                                last_idx = current_subs[-1].index
+
+                                # Thêm từng subtitle vào file tổng - GIỮ NGUYÊN INDEX GỐC
+                                for sub in current_subs:
+                                    new_sub = pysrt.SubRipItem(
+                                        index=sub.index,  # GIỮ NGUYÊN INDEX GỐC
+                                        start=sub.start,
+                                        end=sub.end,
+                                        text=sub.text
+                                    )
+                                    all_subs.append(new_sub)
+
+                                print(f"      └─ Đã thêm {len(current_subs)} câu (index {first_idx}-{last_idx}, tổng: {len(all_subs)})")
+
+                        # Lưu file tổng
+                        all_subs.save(merged_file_path, encoding='utf-8')
+
+                        print(f"\n   ✅ Hoàn thành ghi file tổng")
+                        print(f"   📊 Tổng số câu: {len(all_subs):,}")
+                        if error_files:
+                            print(f"   ⚠️  Lưu ý: Đã bỏ qua {len(error_files)} file lỗi")
+                        print(f"   💾 Đường dẫn: {merged_file_path}")
+                        print(f"{'='*70}\n")
+
+                    else:
+                        print(f"\n   ⚠️  Không có file thành công để merge (tất cả đều có [ERROR])\n")
+
+                except Exception as e:
+                    print(f"\n   ❌ Lỗi khi merge file: {str(e)}\n")
+            # ================================================
+
             # Final report
             print(f"\n{'='*70}")
             print(f"✅ CHUYỂN ÂM THANH THÀNH VĂN BẢN HOÀN TẤT")
@@ -806,6 +882,8 @@ def api_whisper(req: WhisperRequest):
             print(f"      - Tổng cộng: {filtered_count}")
             print(f"   • Số file tạo ra: {len(output_files_list)}")
             print(f"   • Số file đã dịch: {len(translated_files_list)}")
+            if merged_file_path:
+                print(f"   • File tổng VI: {os.path.basename(merged_file_path)}")
             print(f"   • Số file TTS MP3: {len(tts_files_list)}")
             print(f"   • Độ dài trung bình: {stats['avg_segment_length']:.1f} ký tự/câu")
             print(f"\n⏱️  HIỆU SUẤT:")
@@ -828,6 +906,9 @@ def api_whisper(req: WhisperRequest):
                 with translation_lock:
                     for i, f in enumerate(translated_files_list, 1):
                         print(f"   {i}. {os.path.basename(f)}")
+                if merged_file_path:
+                    print(f"\n   === File tổng (Merged) ===")
+                    print(f"   ⭐ {os.path.basename(merged_file_path)}")
             if tts_files_list:
                 print(f"\n   === File TTS MP3 (Từng câu riêng biệt) ===")
                 with tts_lock:
@@ -854,7 +935,8 @@ def api_whisper(req: WhisperRequest):
                 "split_count": len(output_files_list),
                 "output_files": output_files_list,
                 "translated_files": translated_files_list,
-                "tts_files": tts_files_list,  # THÊM TTS FILES VÀO RESPONSE
+                "merged_file": merged_file_path,  # THÊM MERGED FILE VÀO RESPONSE
+                "tts_files": tts_files_list,
                 "tts_files_count": len(tts_files_list),
                 "processing_time": elapsed,
                 "speed_segments_per_minute": round(total_segments/(elapsed/60), 1),
