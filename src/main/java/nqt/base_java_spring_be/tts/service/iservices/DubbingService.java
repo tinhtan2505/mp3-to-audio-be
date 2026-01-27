@@ -12,4 +12,5 @@ public interface DubbingService {
     DubbingResult translateSrt(DubbingFileRequest req);
     Object detectTextRegions(DetectTextRequest req);
     DubbingResult ttsFromViSrt(DubbingFileRequest req);
+    DubbingResult mixAudioBatch(DubbingFileRequest req);
 }

@@ -41,6 +41,9 @@ public class DubbingServiceImpl implements DubbingService {
     @Value("${app.tts.python-tts-from-vi-srt}")
     private String pythonTssFromViSrt;
 
+    @Value("${app.tts.python-tts-batch-from-files}")
+    private String pythonTssBatchFromFiles;
+
     public DubbingServiceImpl() {
         this.restTemplate = new RestTemplate();
     }
@@ -396,6 +399,39 @@ public class DubbingServiceImpl implements DubbingService {
 
         } catch (Exception e) {
             throw new RuntimeException("Lỗi kết nối Python TTS Service: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public DubbingResult mixAudioBatch(DubbingFileRequest req) {
+        String inputPath = req.getInputPath(); // Đường dẫn file SRT
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            Map<String, Object> body = new HashMap<>();
+            body.put("input_srt_path", inputPath);
+            // Có thể bổ sung audio_files_dir nếu bạn lưu MP3 ở thư mục khác thư mục SRT
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            // Gọi sang Python Port 8002 (hoặc port bạn cấu hình cho route này)
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    pythonTssBatchFromFiles,
+                    org.springframework.http.HttpMethod.POST,
+                    entity,
+                    new ParameterizedTypeReference<Map<String, Object>>() {}
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                Map<String, Object> respBody = response.getBody();
+                String outputFile = (String) respBody.get("output_file");
+                return new DubbingResult("success", outputFile);
+            } else {
+                throw new RuntimeException("Python Mix Batch lỗi: " + response.getStatusCode());
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Lỗi kết nối Python Mix Batch: " + e.getMessage());
         }
     }
 }

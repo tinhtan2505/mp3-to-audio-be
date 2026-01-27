@@ -114,4 +114,16 @@ public class DubbingController {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(responseBody);
         }
     }
+
+    @PostMapping("/vi/mix-audio-batch")
+    public ResponseEntity<CustomResponse<?>> mixAudioBatch(@Valid @RequestBody DubbingFileRequest req) {
+        try {
+            // req.getInputPath() là đường dẫn file SRT tiếng Việt
+            DubbingResult data = dubbingService.mixAudioBatch(req);
+            return ResponseEntity.ok(CustomResponse.success(data, "Hợp nhất audio từ batch MP3 thành công"));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(CustomResponse.error("Lỗi Mix Batch: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
+        }
+    }
 }
