@@ -48,3 +48,6 @@ vits-service/.venv/
 # Bỏ qua thư mục cache của HuggingFace (nếu nó lỡ tải vào đây)
 .cache/
 venv/
+
+src/main/java/nqt/base_java_spring_be/tts/python/config.py
+src/main/java/nqt/base_java_spring_be/tts/python/requirements.txt
