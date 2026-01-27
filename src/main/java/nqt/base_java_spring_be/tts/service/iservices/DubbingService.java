@@ -11,4 +11,5 @@ public interface DubbingService {
     DubbingResult mixVideo(MixVideoRequest req);
     DubbingResult translateSrt(DubbingFileRequest req);
     Object detectTextRegions(DetectTextRequest req);
+    DubbingResult ttsFromViSrt(DubbingFileRequest req);
 }

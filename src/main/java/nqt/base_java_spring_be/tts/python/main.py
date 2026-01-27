@@ -7,7 +7,7 @@ from ai_core import load_ai_models, check_system_requirements
 from config import PORT
 
 # Import các router
-from routers import whisper_api, trans_api, tts_api, video_api, video_crop_api, detect_api
+from routers import whisper_api, trans_api, tts_api, video_api, video_crop_api, detect_api, tts_from_vi_srt_api
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -29,6 +29,7 @@ app.include_router(tts_api.router)
 app.include_router(video_api.router)
 app.include_router(video_crop_api.router)
 app.include_router(detect_api.router)
+app.include_router(tts_from_vi_srt_api.router)
 
 if __name__ == "__main__":
     free_port_windows(PORT)

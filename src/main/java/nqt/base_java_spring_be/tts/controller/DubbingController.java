@@ -99,4 +99,19 @@ public class DubbingController {
                     .body(CustomResponse.error("Lỗi Detect Text: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR));
         }
     }
+
+    @PostMapping("/vi/tts-from-srt")
+    public ResponseEntity<CustomResponse<?>> ttsFromViSrt(@Valid @RequestBody DubbingFileRequest req) {
+        try {
+            // Gọi service xử lý TTS từ file SRT tiếng Việt
+            DubbingResult data = dubbingService.ttsFromViSrt(req);
+
+            CustomResponse<DubbingResult> responseBody = CustomResponse.success(data, "Tạo các file TTS từ SRT thành công");
+            return ResponseEntity.ok(responseBody);
+
+        } catch (Exception e) {
+            CustomResponse<?> responseBody = CustomResponse.error("Lỗi tạo TTS: " + e.getMessage(), HttpStatus.INTERNAL_SERVER_ERROR);
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(responseBody);
+        }
+    }
 }

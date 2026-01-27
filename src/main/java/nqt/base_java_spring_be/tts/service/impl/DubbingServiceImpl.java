@@ -38,6 +38,9 @@ public class DubbingServiceImpl implements DubbingService {
     @Value("${app.tts.python-detect-text-url}")
     private String pythonDetectTextUrl;
 
+    @Value("${app.tts.python-tts-from-vi-srt}")
+    private String pythonTssFromViSrt;
+
     public DubbingServiceImpl() {
         this.restTemplate = new RestTemplate();
     }
@@ -352,6 +355,47 @@ public class DubbingServiceImpl implements DubbingService {
             }
         } catch (Exception e) {
             throw new RuntimeException("Không kết nối được Python Detect API: " + e.getMessage());
+        }
+    }
+
+    @Override
+    public DubbingResult ttsFromViSrt(DubbingFileRequest req) {
+        String inputPath = req.getInputPath();
+
+        // 1. Kiểm tra file SRT tồn tại
+        File f = new File(inputPath);
+        if (!f.exists()) {
+            throw new RuntimeException("File SRT tiếng Việt không tồn tại: " + inputPath);
+        }
+
+        try {
+            // 2. Chuẩn bị gọi Python (Sử dụng URL port 8002)
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            Map<String, Object> body = new HashMap<>();
+            // Key này phải khớp với TtsFromViSrtRequest trong Python của bạn (vi_srt_path)
+            body.put("vi_srt_path", inputPath);
+
+            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    pythonTssFromViSrt,
+                    org.springframework.http.HttpMethod.POST,
+                    entity,
+                    new ParameterizedTypeReference<Map<String, Object>>() {}
+            );
+
+            if (response.getStatusCode().is2xxSuccessful() && response.getBody() != null) {
+                Map<String, Object> respBody = response.getBody();
+                String ttsDir = (String) respBody.get("tts_directory");
+                return new DubbingResult("success", ttsDir);
+            } else {
+                throw new RuntimeException("Python TTS lỗi: " + response.getStatusCode());
+            }
+
+        } catch (Exception e) {
+            throw new RuntimeException("Lỗi kết nối Python TTS Service: " + e.getMessage());
         }
     }
 }
