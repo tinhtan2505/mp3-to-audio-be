@@ -85,24 +85,8 @@ def load_ai_models():
                 # CÁCH ĐÚNG cho v1.60.0: Truyền api_key trực tiếp vào Client
                 client = genai.Client(api_key=key)
 
-                # Test kết nối bằng generate đơn giản
-                try:
-                    test_response = client.models.generate_content(
-                        model='gemini-2.5-flash',
-                        contents='Hello, respond with just OK'
-                    )
-
-                    if test_response and hasattr(test_response, 'text'):
-                        print(f"      ✅ Test thành công: {test_response.text[:50]}")
-                        AI_MODELS["gemini_client"] = client
-                        Logger.success(f"Gemini đã kết nối thành công với Key #{index+1}")
-                        break
-                    else:
-                        print(f"      ❌ Phản hồi không hợp lệ")
-
-                except Exception as test_err:
-                    print(f"      ❌ Test thất bại: {str(test_err)[:100]}")
-                    continue
+                AI_MODELS["gemini_client"] = client
+                Logger.success(f"Gemini đã kết nối thành công với Key #{index+1}")
 
             except Exception as e:
                 Logger.warning(f"⚠️ Key #{index+1} thất bại: {str(e)[:100]}... -> Đang chuyển Key tiếp theo.")
