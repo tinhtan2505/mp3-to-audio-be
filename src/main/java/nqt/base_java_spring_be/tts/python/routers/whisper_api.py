@@ -5,6 +5,9 @@ import threading
 import uuid
 import re
 import asyncio
+import librosa
+import soundfile as sf
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
 from google.genai.types import GenerateContentConfig
@@ -13,7 +16,7 @@ from ai_core import AI_MODELS
 from config import (
     WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE,
     TRANS_DELAY_SECONDS_GEMINI, SYSTEM_INSTRUCTION_TRANS_GEMINI,
-    GEMINI_API_KEYS, VOICE_MALE, VOICE_FEMALE
+    GEMINI_API_KEYS, VOICE_MALE, VOICE_FEMALE, SAMPLE_RATE
 )
 from utils import Logger, get_timestamp_str, normalize_segment_time, generate_tts
 
@@ -309,25 +312,93 @@ def translate_srt_file_simple(input_srt_path):
 
 
 # ============================================================================
-# TTS FUNCTIONS - TẠO TỪNG FILE MP3 RIÊNG BIỆT THEO INDEX
+# TTS FUNCTIONS - XỬ LÝ THỜI GIAN & TĂNG TỐC AUDIO
 # ============================================================================
 
-async def generate_tts_internal(text, voice, output_file, rate="+0%"):
+async def generate_tts_with_speedup(text, voice, output_file, available_space, rate="+0%"):
     """
-    Hàm TTS nội bộ - wrapper cho generate_tts từ utils
+    Tạo TTS với tự động tăng tốc nếu audio quá dài
+
+    Args:
+        text: Nội dung cần TTS
+        voice: Giọng đọc
+        output_file: Đường dẫn file MP3 đầu ra
+        available_space: Thời gian khả dụng (giây)
+        rate: Tốc độ ban đầu
+
+    Returns:
+        dict: {
+            'success': bool,
+            'duration': float,  # Thời lượng audio thực tế
+            'speedup_percent': int,  # % tăng tốc đã áp dụng
+            'status': str  # ✓ hoặc ⚡X%
+        }
     """
+    MAX_SPEED_UP = 60
+    tmp_file = f"temp_{uuid.uuid4().hex}.mp3"
+
     try:
-        await generate_tts(text, voice, output_file, rate)
-        return True
+        # Bước 1: TTS với tốc độ ban đầu
+        await generate_tts(text, voice, tmp_file, rate=rate)
+
+        # Bước 2: Load và trim audio
+        y, _ = librosa.load(tmp_file, sr=SAMPLE_RATE)
+        y_trimmed, _ = librosa.effects.trim(y, top_db=30)
+        dur_original = len(y_trimmed) / SAMPLE_RATE
+
+        # Bước 3: Kiểm tra có cần tăng tốc không
+        speedup_percent = 0
+        status = "✓"
+
+        if dur_original > available_space and available_space >= 0.5:
+            # Tính tốc độ cần tăng
+            needed_ratio = (dur_original / available_space) - 1.0
+            speedup_percent = min(int(needed_ratio * 100) + 5, MAX_SPEED_UP)
+            final_rate_str = f"+{speedup_percent}%"
+
+            # TTS lại với tốc độ mới
+            os.remove(tmp_file)
+            await generate_tts(text, voice, tmp_file, rate=final_rate_str)
+
+            # Load lại audio đã tăng tốc
+            y, _ = librosa.load(tmp_file, sr=SAMPLE_RATE)
+            y_trimmed, _ = librosa.effects.trim(y, top_db=30)
+
+            status = f"⚡{speedup_percent}%"
+
+        # Bước 4: Lưu file cuối cùng
+        final_duration = len(y_trimmed) / SAMPLE_RATE
+
+        # Chuyển sang file đầu ra cuối cùng
+        if os.path.exists(output_file):
+            os.remove(output_file)
+        os.rename(tmp_file, output_file)
+
+        return {
+            'success': True,
+            'duration': final_duration,
+            'speedup_percent': speedup_percent,
+            'status': status,
+            'audio_data': y_trimmed  # Có thể dùng để ghép file tổng sau này
+        }
+
     except Exception as e:
-        print(f"      ❌ TTS error: {str(e)[:50]}")
-        return False
+        print(f"      ❌ TTS error: {str(e)[:100]}")
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+        return {
+            'success': False,
+            'duration': 0,
+            'speedup_percent': 0,
+            'status': '❌',
+            'audio_data': None
+        }
 
 
-async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
+async def tts_batch_with_timing(vi_srt_path, tts_files_list, lock):
     """
-    Xử lý TTS cho file VI đã dịch xong
-    TẠO TỪNG FILE MP3 RIÊNG BIỆT CHO MỖI SUBTITLE
+    Xử lý TTS cho file VI với LOGIC THỜI GIAN & TĂNG TỐC
+    TẠO TỪNG FILE MP3 ĐÃ XỬ LÝ THỜI GIAN, SẴN SÀNG ĐỂ GHÉP
     """
     start_time = time.time()
 
@@ -338,7 +409,7 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
         os.makedirs(tts_dir, exist_ok=True)
 
         print(f"\n{'='*70}")
-        print(f"🎤 BẮT ĐẦU TẠO TTS TỰ ĐỘNG CHO FILE VI")
+        print(f"🎤 BẮT ĐẦU TẠO TTS VỚI XỬ LÝ THỜI GIAN")
         print(f"{'='*70}")
         print(f"   📂 File VI: {os.path.basename(vi_srt_path)}")
         print(f"   📁 Thư mục TTS: {tts_dir}")
@@ -368,16 +439,24 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
             BATCH_SIZE = 60
 
         MAX_CONCURRENT_TASKS = 50
+        SAFETY_GAP = 0.1  # Khoảng cách an toàn giữa các câu
 
         print(f"   • Tổng câu: {total_subs:,}")
         print(f"   • Batch size: {BATCH_SIZE} câu/lần")
         print(f"   • Số batch: {(total_subs + BATCH_SIZE - 1) // BATCH_SIZE}")
         print(f"   • Max concurrent: {MAX_CONCURRENT_TASKS}")
+        print(f"   • Safety gap: {SAFETY_GAP}s")
         print(f"   • Ước tính thời gian: ~{(total_subs / BATCH_SIZE * 0.8):.0f}s ({(total_subs / BATCH_SIZE * 0.8 / 60):.1f} phút)\n")
 
         processed_count = 0
         success_count = 0
         failed_count = 0
+        speedup_count = 0
+        total_speedup_percent = 0
+
+        # Tạo file JSON metadata để lưu thông tin timing
+        metadata_file = os.path.join(tts_dir, "timing_metadata.json")
+        metadata = {}
 
         # Xử lý từng batch
         for batch_start in range(0, total_subs, BATCH_SIZE):
@@ -388,7 +467,7 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
 
             print(f"\n📦 Batch {batch_num}/{total_batches} | Câu {batch_start+1}-{batch_end} | Tiến độ: {(batch_end/total_subs*100):.1f}%")
 
-            # Chuẩn bị data cho batch
+            # Chuẩn bị data cho batch với LOGIC THỜI GIAN
             batch_data = []
             for i, sub in enumerate(batch_subs):
                 txt_raw = sub.text.strip()
@@ -399,14 +478,36 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
                 is_male = "[NAM" in txt_raw.upper() or "[M]" in txt_raw.upper()
                 voice = VOICE_MALE if is_male else VOICE_FEMALE
 
+                # Tính toán thời gian
+                start_sec = sub.start.ordinal / 1000.0
+                end_sec = sub.end.ordinal / 1000.0
+                slot_duration = end_sec - start_sec
+
+                # Tính hard_limit (thời gian tối đa có thể dùng)
+                global_idx = batch_start + i
+                if global_idx < total_subs - 1:
+                    next_start = subs[global_idx + 1].start.ordinal / 1000.0
+                    hard_limit = next_start - SAFETY_GAP
+                else:
+                    hard_limit = end_sec + 5.0
+                hard_limit = max(hard_limit, end_sec)
+
+                available_space = hard_limit - start_sec
+
                 # Tên file: sử dụng index thực tế từ SRT file
                 output_filename = f"{sub.index}.mp3"
                 output_path = os.path.join(tts_dir, output_filename)
 
                 batch_data.append({
-                    'index': sub.index,  # Sử dụng index thực tế từ SRT
+                    'index': sub.index,
                     'text': clean_txt,
                     'voice': voice,
+                    'is_male': is_male,
+                    'start_sec': start_sec,
+                    'end_sec': end_sec,
+                    'slot_duration': slot_duration,
+                    'hard_limit': hard_limit,
+                    'available_space': available_space,
                     'output_path': output_path
                 })
 
@@ -419,15 +520,22 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
             async def generate_with_limit(item):
                 async with semaphore:
                     try:
-                        success = await generate_tts_internal(
+                        result = await generate_tts_with_speedup(
                             item['text'],
                             item['voice'],
                             item['output_path'],
+                            item['available_space'],
                             rate="+0%"
                         )
-                        return item['index'], success
+                        return item['index'], result
                     except Exception as e:
-                        return item['index'], False
+                        return item['index'], {
+                            'success': False,
+                            'duration': 0,
+                            'speedup_percent': 0,
+                            'status': '❌',
+                            'audio_data': None
+                        }
 
             # Tạo tasks
             tasks = [generate_with_limit(item) for item in batch_data]
@@ -440,11 +548,31 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
                     timeout=60 * len(batch_data)
                 )
 
-                # Đếm thành công/thất bại
-                for idx, success in results:
+                # Xử lý kết quả
+                for idx, result in results:
                     processed_count += 1
-                    if success:
+
+                    if result['success']:
                         success_count += 1
+
+                        # Lưu metadata
+                        item = next((x for x in batch_data if x['index'] == idx), None)
+                        if item:
+                            metadata[str(idx)] = {
+                                'start_sec': item['start_sec'],
+                                'end_sec': item['end_sec'],
+                                'slot_duration': item['slot_duration'],
+                                'hard_limit': item['hard_limit'],
+                                'available_space': item['available_space'],
+                                'actual_duration': result['duration'],
+                                'speedup_percent': result['speedup_percent'],
+                                'status': result['status']
+                            }
+
+                        if result['speedup_percent'] > 0:
+                            speedup_count += 1
+                            total_speedup_percent += result['speedup_percent']
+
                         # Thêm vào danh sách kết quả
                         output_file = os.path.join(tts_dir, f"{idx}.mp3")
                         if os.path.exists(output_file):
@@ -459,18 +587,27 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
                 continue
 
             batch_tts_time = time.time() - batch_start_time
-            print(f"   ⏱️ TTS time: {batch_tts_time:.1f}s | Avg: {batch_tts_time/len(batch_data):.2f}s/câu")
-            print(f"   ✓ Thành công: {success_count} | ❌ Thất bại: {failed_count} | 📊 Đã xử lý: {processed_count}/{total_subs}")
+            print(f"   ⏱️  TTS time: {batch_tts_time:.1f}s | Avg: {batch_tts_time/len(batch_data):.2f}s/câu")
+            print(f"   ✓ Thành công: {success_count} | ⚡ Tăng tốc: {speedup_count} | ❌ Thất bại: {failed_count}")
+            print(f"   📊 Đã xử lý: {processed_count}/{total_subs}")
+
+        # Lưu metadata
+        import json
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
 
         elapsed = time.time() - start_time
+        avg_speedup = total_speedup_percent / speedup_count if speedup_count > 0 else 0
 
         print(f"\n{'='*70}")
-        print(f"✅ TTS HOÀN TẤT")
+        print(f"✅ TTS VỚI XỬ LÝ THỜI GIAN HOÀN TẤT")
         print(f"{'='*70}")
         print(f"   📁 Thư mục TTS: {tts_dir}")
         print(f"   📊 Tổng câu xử lý: {processed_count:,}/{total_subs:,}")
         print(f"   ✓ Thành công: {success_count:,} file MP3")
+        print(f"   ⚡ Đã tăng tốc: {speedup_count:,} file (trung bình: {avg_speedup:.1f}%)")
         print(f"   ❌ Thất bại: {failed_count:,} file")
+        print(f"   📄 Metadata: {os.path.basename(metadata_file)}")
         print(f"   ⏱️  Thời gian: {elapsed:.1f}s ({elapsed/60:.1f} phút)")
         if processed_count > 0:
             print(f"   ⚡ Tốc độ: {processed_count/elapsed:.1f} file/giây")
@@ -478,7 +615,7 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
 
     except Exception as e:
         print(f"\n{'='*70}")
-        print(f"❌ LỖI TTS CHO FILE VI")
+        print(f"❌ LỖI TTS VỚI XỬ LÝ THỜI GIAN")
         print(f"{'='*70}")
         print(f"   🔴 Lỗi: {str(e)}")
         print(f"   📂 File: {os.path.basename(vi_srt_path)}")
@@ -487,12 +624,12 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
 
 def tts_file_background(vi_srt_path, tts_files_list, lock):
     """
-    Wrapper để chạy async TTS trong thread riêng
+    Wrapper để chạy async TTS với xử lý thời gian trong thread riêng
     """
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock))
+        loop.run_until_complete(tts_batch_with_timing(vi_srt_path, tts_files_list, lock))
         loop.close()
     except Exception as e:
         print(f"   ❌ [Background TTS] Lỗi: {e}\n")
@@ -501,7 +638,7 @@ def tts_file_background(vi_srt_path, tts_files_list, lock):
 def translate_file_background(file_path, translated_files_list, lock, tts_files_list, tts_lock):
     """
     Hàm chạy trong thread riêng để dịch file mà không block Whisper
-    SAU KHI DỊCH THÀNH CÔNG -> TỰ ĐỘNG GỌI TTS
+    SAU KHI DỊCH THÀNH CÔNG -> TỰ ĐỘNG GỌI TTS VỚI XỬ LÝ THỜI GIAN
     """
     try:
         translated_file = translate_srt_file_simple(file_path)
@@ -511,8 +648,8 @@ def translate_file_background(file_path, translated_files_list, lock, tts_files_
                 translated_files_list.append(translated_file)
             print(f"   ✅ [Background] Đã dịch xong: {os.path.basename(translated_file)}\n")
 
-            # ========== TỰ ĐỘNG TẠO TTS SAU KHI DỊCH THÀNH CÔNG ==========
-            print(f"   🎤 [Background] Bắt đầu tạo TTS cho: {os.path.basename(translated_file)}\n")
+            # ========== TỰ ĐỘNG TẠO TTS VỚI XỬ LÝ THỜI GIAN ==========
+            print(f"   🎤 [Background] Bắt đầu TTS với xử lý thời gian: {os.path.basename(translated_file)}\n")
             tts_thread = threading.Thread(
                 target=tts_file_background,
                 args=(translated_file, tts_files_list, tts_lock),
@@ -556,9 +693,9 @@ def api_whisper(req: WhisperRequest):
             timestamp_str = get_timestamp_str()
             output_files_list = []
             translated_files_list = []
-            tts_files_list = []  # THÊM DANH SÁCH TTS
+            tts_files_list = []
             translation_lock = threading.Lock()
-            tts_lock = threading.Lock()  # THÊM LOCK CHO TTS
+            tts_lock = threading.Lock()
             translation_threads = []
 
             # Tracking variables
@@ -706,7 +843,7 @@ def api_whisper(req: WhisperRequest):
                         print(f"      └─ Đường dẫn: {os.path.basename(current_file_path)}")
                         print(f"      └─ Thời gian: {elapsed:.1f}s\n")
 
-                        # DỊCH FILE TRONG BACKGROUND (sẽ tự động trigger TTS)
+                        # DỊCH FILE TRONG BACKGROUND (sẽ tự động trigger TTS với xử lý thời gian)
                         if GEMINI_API_KEYS:
                             thread = threading.Thread(
                                 target=translate_file_background,
@@ -735,7 +872,7 @@ def api_whisper(req: WhisperRequest):
                     current_file_handle.close()
                     print(f"\n   ✅ File cuối cùng hoàn thành: {segments_in_current_file} câu")
 
-                    # DỊCH FILE CUỐI CÙNG (sẽ tự động trigger TTS)
+                    # DỊCH FILE CUỐI CÙNG (sẽ tự động trigger TTS với xử lý thời gian)
                     if GEMINI_API_KEYS:
                         thread = threading.Thread(
                             target=translate_file_background,
@@ -783,11 +920,11 @@ def api_whisper(req: WhisperRequest):
 
             # Chờ tất cả translation threads hoàn thành
             print(f"\n{'='*70}")
-            print(f"⏳ Đang chờ các tiến trình dịch và TTS hoàn thành...")
+            print(f"⏳ Đang chờ các tiến trình dịch và TTS (có xử lý thời gian) hoàn thành...")
             print(f"{'='*70}\n")
 
             for i, thread in enumerate(translation_threads, 1):
-                thread.join(timeout=600)  # Tăng timeout lên 10 phút cho cả dịch + TTS
+                thread.join(timeout=600)  # Timeout 10 phút
                 if thread.is_alive():
                     print(f"   ⚠️  Thread {i} vẫn đang chạy (timeout)")
 
@@ -796,10 +933,8 @@ def api_whisper(req: WhisperRequest):
             if translated_files_list:
                 try:
                     with translation_lock:
-                        # Sắp xếp các file theo thứ tự part01, part02, ...
                         sorted_files = sorted(translated_files_list, key=lambda x: x)
 
-                    # Lọc ra các file SUCCESS (không có [ERROR])
                     success_files = [f for f in sorted_files if '[ERROR]' not in f]
                     error_files = [f for f in sorted_files if '[ERROR]' in f]
 
@@ -814,15 +949,12 @@ def api_whisper(req: WhisperRequest):
                             for ef in error_files:
                                 print(f"      • {os.path.basename(ef)}")
 
-                        # Tạo tên file tổng: video_cn_20260127_114537_vi_FULL.srt
                         base_name = os.path.basename(success_files[0])
-                        # Loại bỏ _part01_vi.srt để lấy base
                         merged_name = re.sub(r'_part\d+_vi\.srt$', '_vi_FULL.srt', base_name)
                         merged_file_path = os.path.join(out_dir, merged_name)
 
                         print(f"   📝 File đầu ra: {merged_name}\n")
 
-                        # Merge CHỈ các file SUCCESS - GIỮ NGUYÊN INDEX GỐC
                         all_subs = pysrt.SubRipFile()
 
                         for i, vi_file in enumerate(success_files, 1):
@@ -833,15 +965,13 @@ def api_whisper(req: WhisperRequest):
                             except:
                                 current_subs = pysrt.open(vi_file)
 
-                            # Lấy range index từ file này
                             if current_subs:
                                 first_idx = current_subs[0].index
                                 last_idx = current_subs[-1].index
 
-                                # Thêm từng subtitle vào file tổng - GIỮ NGUYÊN INDEX GỐC
                                 for sub in current_subs:
                                     new_sub = pysrt.SubRipItem(
-                                        index=sub.index,  # GIỮ NGUYÊN INDEX GỐC
+                                        index=sub.index,
                                         start=sub.start,
                                         end=sub.end,
                                         text=sub.text
@@ -850,7 +980,6 @@ def api_whisper(req: WhisperRequest):
 
                                 print(f"      └─ Đã thêm {len(current_subs)} câu (index {first_idx}-{last_idx}, tổng: {len(all_subs)})")
 
-                        # Lưu file tổng
                         all_subs.save(merged_file_path, encoding='utf-8')
 
                         print(f"\n   ✅ Hoàn thành ghi file tổng")
@@ -865,67 +994,28 @@ def api_whisper(req: WhisperRequest):
 
                 except Exception as e:
                     print(f"\n   ❌ Lỗi khi merge file: {str(e)}\n")
-            # ================================================
 
             # Final report
             print(f"\n{'='*70}")
-            print(f"✅ CHUYỂN ÂM THANH THÀNH VĂN BẢN HOÀN TẤT")
+            print(f"✅ HOÀN TẤT - FILE TTS ĐÃ SẴN SÀNG ĐỂ GHÉP")
             print(f"{'='*70}")
             print(f"📊 THỐNG KÊ:")
             print(f"   • Ngôn ngữ: {info.language} (độ tin cậy: {info.language_probability:.2%})")
             print(f"   • Tổng số câu: {total_segments:,}")
-            print(f"   • Câu hợp lệ: {total_segments:,}")
-            print(f"   • Đã lọc bỏ:")
-            print(f"      - Trùng lặp: {stats['duplicates']}")
-            print(f"      - Rỗng: {stats['empty_segments']}")
-            print(f"      - Quá ngắn: {stats['short_segments']}")
-            print(f"      - Tổng cộng: {filtered_count}")
-            print(f"   • Số file tạo ra: {len(output_files_list)}")
-            print(f"   • Số file đã dịch: {len(translated_files_list)}")
+            print(f"   • Số file TTS MP3: {len(tts_files_list)} (đã xử lý thời gian)")
+            print(f"   • Metadata timing: tts/timing_metadata.json")
             if merged_file_path:
                 print(f"   • File tổng VI: {os.path.basename(merged_file_path)}")
-            print(f"   • Số file TTS MP3: {len(tts_files_list)}")
-            print(f"   • Độ dài trung bình: {stats['avg_segment_length']:.1f} ký tự/câu")
             print(f"\n⏱️  HIỆU SUẤT:")
             print(f"   • Tổng thời gian: {elapsed:.2f}s ({elapsed/60:.1f} phút)")
             print(f"   • Tốc độ xử lý: {total_segments/(elapsed/60):.1f} câu/phút")
-            print(f"   • Thời lượng audio: ~{stats['total_duration']:.1f}s")
-            print(f"   • Hệ số thời gian thực: {stats['total_duration']/elapsed:.2f}x")
-            print(f"\n🔑 GEMINI KEY USAGE:")
-            print(f"   • Key cuối cùng: #{GEMINI_STATE['current_key_index']+1}/{len(GEMINI_API_KEYS) if GEMINI_API_KEYS else 0}")
-            print(f"   • Key đã fail: {len(GEMINI_STATE['failed_keys'])}")
-            if GEMINI_STATE['failed_keys']:
-                failed_list = ', '.join([f"#{i+1}" for i in sorted(GEMINI_STATE['failed_keys'])])
-                print(f"   • Danh sách fail: {failed_list}")
-            print(f"\n📁 CÁC FILE ĐẦU RA:")
-            print(f"   === File gốc (Tiếng Trung) ===")
-            for i, f in enumerate(output_files_list, 1):
-                print(f"   {i}. {os.path.basename(f)}")
-            if translated_files_list:
-                print(f"\n   === File đã dịch (Tiếng Việt) ===")
-                with translation_lock:
-                    for i, f in enumerate(translated_files_list, 1):
-                        print(f"   {i}. {os.path.basename(f)}")
-                if merged_file_path:
-                    print(f"\n   === File tổng (Merged) ===")
-                    print(f"   ⭐ {os.path.basename(merged_file_path)}")
-            if tts_files_list:
-                print(f"\n   === File TTS MP3 (Từng câu riêng biệt) ===")
-                with tts_lock:
-                    print(f"   📁 Thư mục: tts/")
-                    print(f"   📊 Tổng số file: {len(tts_files_list)}")
-                    if len(tts_files_list) <= 10:
-                        for i, f in enumerate(tts_files_list, 1):
-                            print(f"   {i}. {os.path.basename(f)}")
-                    else:
-                        for i in range(5):
-                            print(f"   {i+1}. {os.path.basename(tts_files_list[i])}")
-                        print(f"   ... ({len(tts_files_list) - 10} files khác)")
-                        for i in range(-5, 0):
-                            print(f"   {len(tts_files_list) + i + 1}. {os.path.basename(tts_files_list[i])}")
+            print(f"\n💡 LƯU Ý:")
+            print(f"   • Các file MP3 đã được tăng tốc (nếu cần)")
+            print(f"   • Metadata chứa thông tin thời gian chính xác")
+            print(f"   • Sẵn sàng để ghép vào file audio tổng")
             print(f"{'='*70}\n")
 
-            Logger.success(f"Whisper hoàn tất: {len(output_files_list)} files, {total_segments} câu", elapsed)
+            Logger.success(f"Whisper hoàn tất: {len(tts_files_list)} TTS files sẵn sàng", elapsed)
 
             return {
                 "status": "success",
@@ -935,9 +1025,11 @@ def api_whisper(req: WhisperRequest):
                 "split_count": len(output_files_list),
                 "output_files": output_files_list,
                 "translated_files": translated_files_list,
-                "merged_file": merged_file_path,  # THÊM MERGED FILE VÀO RESPONSE
+                "merged_file": merged_file_path,
                 "tts_files": tts_files_list,
                 "tts_files_count": len(tts_files_list),
+                "tts_ready_for_merge": True,
+                "metadata_file": os.path.join(os.path.dirname(path), "tts", "timing_metadata.json"),
                 "processing_time": elapsed,
                 "speed_segments_per_minute": round(total_segments/(elapsed/60), 1),
                 "statistics": {
