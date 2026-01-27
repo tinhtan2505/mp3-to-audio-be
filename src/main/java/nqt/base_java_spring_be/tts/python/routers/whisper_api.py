@@ -399,14 +399,12 @@ async def tts_batch_for_vi_file(vi_srt_path, tts_files_list, lock):
                 is_male = "[NAM" in txt_raw.upper() or "[M]" in txt_raw.upper()
                 voice = VOICE_MALE if is_male else VOICE_FEMALE
 
-                global_idx = batch_start + i
-
-                # Tên file: index.mp3 (ví dụ: 1.mp3, 2.mp3, ...)
-                output_filename = f"{global_idx + 1}.mp3"
+                # Tên file: sử dụng index thực tế từ SRT file
+                output_filename = f"{sub.index}.mp3"
                 output_path = os.path.join(tts_dir, output_filename)
 
                 batch_data.append({
-                    'index': global_idx + 1,  # Index bắt đầu từ 1
+                    'index': sub.index,  # Sử dụng index thực tế từ SRT
                     'text': clean_txt,
                     'voice': voice,
                     'output_path': output_path
