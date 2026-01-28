@@ -591,10 +591,27 @@ async def tts_batch_with_timing(vi_srt_path, tts_files_list, lock):
             print(f"   ✓ Thành công: {success_count} | ⚡ Tăng tốc: {speedup_count} | ❌ Thất bại: {failed_count}")
             print(f"   📊 Đã xử lý: {processed_count}/{total_subs}")
 
-        # Lưu metadata
+        # Lưu metadata (MERGE với metadata cũ nếu có)
         import json
+
+        # Load metadata cũ nếu file đã tồn tại
+        existing_metadata = {}
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    existing_metadata = json.load(f)
+                print(f"   📖 Đã load {len(existing_metadata):,} entries từ metadata cũ")
+            except:
+                pass  # Nếu file lỗi thì bỏ qua
+
+        # Merge metadata mới vào metadata cũ
+        existing_metadata.update(metadata)
+
+        # Lưu metadata đầy đủ
         with open(metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(metadata, f, indent=2, ensure_ascii=False)
+            json.dump(existing_metadata, f, indent=2, ensure_ascii=False)
+
+        print(f"   💾 Đã lưu {len(existing_metadata):,} entries vào metadata (+ {len(metadata):,} mới)")
 
         elapsed = time.time() - start_time
         avg_speedup = total_speedup_percent / speedup_count if speedup_count > 0 else 0
