@@ -3,9 +3,12 @@ import time
 import pysrt
 import re
 import asyncio
+import uuid
+import librosa
+import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from config import VOICE_MALE, VOICE_FEMALE
+from config import VOICE_MALE, VOICE_FEMALE, SAMPLE_RATE
 from utils import Logger, get_timestamp_str, generate_tts
 
 router = APIRouter()
@@ -15,22 +18,90 @@ class TtsFromViSrtRequest(BaseModel):
     vi_srt_path: str  # Đường dẫn đến file SRT VI
 
 
-async def generate_tts_internal(text, voice, output_file, rate="+0%"):
+async def generate_tts_with_speedup(text, voice, output_file, available_space, rate="+0%"):
     """
-    Hàm TTS nội bộ - wrapper cho generate_tts từ utils
+    Tạo TTS với tự động tăng tốc nếu audio quá dài
+
+    Args:
+        text: Nội dung cần TTS
+        voice: Giọng đọc
+        output_file: Đường dẫn file MP3 đầu ra
+        available_space: Thời gian khả dụng (giây)
+        rate: Tốc độ ban đầu
+
+    Returns:
+        dict: {
+            'success': bool,
+            'duration': float,  # Thời lượng audio thực tế
+            'speedup_percent': int,  # % tăng tốc đã áp dụng
+            'status': str  # ✓ hoặc ⚡X%
+        }
     """
+    MAX_SPEED_UP = 60
+    tmp_file = f"temp_{uuid.uuid4().hex}.mp3"
+
     try:
-        await generate_tts(text, voice, output_file, rate)
-        return True
+        # Bước 1: TTS với tốc độ ban đầu
+        await generate_tts(text, voice, tmp_file, rate=rate)
+
+        # Bước 2: Load và trim audio
+        y, _ = librosa.load(tmp_file, sr=SAMPLE_RATE)
+        y_trimmed, _ = librosa.effects.trim(y, top_db=30)
+        dur_original = len(y_trimmed) / SAMPLE_RATE
+
+        # Bước 3: Kiểm tra có cần tăng tốc không
+        speedup_percent = 0
+        status = "✓"
+
+        if dur_original > available_space and available_space >= 0.5:
+            # Tính tốc độ cần tăng
+            needed_ratio = (dur_original / available_space) - 1.0
+            speedup_percent = min(int(needed_ratio * 100) + 5, MAX_SPEED_UP)
+            final_rate_str = f"+{speedup_percent}%"
+
+            # TTS lại với tốc độ mới
+            os.remove(tmp_file)
+            await generate_tts(text, voice, tmp_file, rate=final_rate_str)
+
+            # Load lại audio đã tăng tốc
+            y, _ = librosa.load(tmp_file, sr=SAMPLE_RATE)
+            y_trimmed, _ = librosa.effects.trim(y, top_db=30)
+
+            status = f"⚡{speedup_percent}%"
+
+        # Bước 4: Lưu file cuối cùng
+        final_duration = len(y_trimmed) / SAMPLE_RATE
+
+        # Chuyển sang file đầu ra cuối cùng
+        if os.path.exists(output_file):
+            os.remove(output_file)
+        os.rename(tmp_file, output_file)
+
+        return {
+            'success': True,
+            'duration': final_duration,
+            'speedup_percent': speedup_percent,
+            'status': status,
+            'audio_data': y_trimmed  # Có thể dùng để ghép file tổng sau này
+        }
+
     except Exception as e:
-        print(f"      ❌ TTS error: {str(e)[:50]}")
-        return False
+        print(f"      ❌ TTS error: {str(e)[:100]}")
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+        return {
+            'success': False,
+            'duration': 0,
+            'speedup_percent': 0,
+            'status': '❌',
+            'audio_data': None
+        }
 
 
 async def tts_batch_processing(vi_srt_path):
     """
-    Xử lý TTS cho file VI SRT
-    TẠO TỪNG FILE MP3 RIÊNG BIỆT CHO MỖI SUBTITLE
+    Xử lý TTS cho file VI SRT với LOGIC THỜI GIAN & TĂNG TỐC
+    TẠO TỪNG FILE MP3 ĐÃ XỬ LÝ THỜI GIAN, SẴN SÀNG ĐỂ GHÉP
     """
     start_time = time.time()
 
@@ -45,7 +116,7 @@ async def tts_batch_processing(vi_srt_path):
         os.makedirs(tts_dir, exist_ok=True)
 
         print(f"\n{'='*70}")
-        print(f"🎤 BẮT ĐẦU TẠO TTS TỪ FILE SRT VI")
+        print(f"🎤 BẮT ĐẦU TẠO TTS VỚI XỬ LÝ THỜI GIAN")
         print(f"{'='*70}")
         print(f"   📂 File VI: {os.path.basename(vi_srt_path)}")
         print(f"   📁 Thư mục TTS: {tts_dir}")
@@ -74,17 +145,25 @@ async def tts_batch_processing(vi_srt_path):
             BATCH_SIZE = 60
 
         MAX_CONCURRENT_TASKS = 50
+        SAFETY_GAP = 0.1  # Khoảng cách an toàn giữa các câu
 
         print(f"   • Tổng câu: {total_subs:,}")
         print(f"   • Batch size: {BATCH_SIZE} câu/lần")
         print(f"   • Số batch: {(total_subs + BATCH_SIZE - 1) // BATCH_SIZE}")
         print(f"   • Max concurrent: {MAX_CONCURRENT_TASKS}")
+        print(f"   • Safety gap: {SAFETY_GAP}s")
         print(f"   • Ước tính thời gian: ~{(total_subs / BATCH_SIZE * 0.8):.0f}s ({(total_subs / BATCH_SIZE * 0.8 / 60):.1f} phút)\n")
 
         processed_count = 0
         success_count = 0
         failed_count = 0
+        speedup_count = 0
+        total_speedup_percent = 0
         tts_files_list = []
+
+        # Tạo file JSON metadata để lưu thông tin timing
+        metadata_file = os.path.join(tts_dir, "timing_metadata.json")
+        metadata = {}
 
         # Xử lý từng batch
         for batch_start in range(0, total_subs, BATCH_SIZE):
@@ -95,7 +174,7 @@ async def tts_batch_processing(vi_srt_path):
 
             print(f"\n📦 Batch {batch_num}/{total_batches} | Câu {batch_start+1}-{batch_end} | Tiến độ: {(batch_end/total_subs*100):.1f}%")
 
-            # Chuẩn bị data cho batch
+            # Chuẩn bị data cho batch với LOGIC THỜI GIAN
             batch_data = []
             for i, sub in enumerate(batch_subs):
                 txt_raw = sub.text.strip()
@@ -107,14 +186,36 @@ async def tts_batch_processing(vi_srt_path):
                 is_male = "[NAM" in txt_raw.upper() or "[M]" in txt_raw.upper()
                 voice = VOICE_MALE if is_male else VOICE_FEMALE
 
+                # Tính toán thời gian
+                start_sec = sub.start.ordinal / 1000.0
+                end_sec = sub.end.ordinal / 1000.0
+                slot_duration = end_sec - start_sec
+
+                # Tính hard_limit (thời gian tối đa có thể dùng)
+                global_idx = batch_start + i
+                if global_idx < total_subs - 1:
+                    next_start = subs[global_idx + 1].start.ordinal / 1000.0
+                    hard_limit = next_start - SAFETY_GAP
+                else:
+                    hard_limit = end_sec + 5.0
+                hard_limit = max(hard_limit, end_sec)
+
+                available_space = hard_limit - start_sec
+
                 # Tên file: sử dụng index thực tế từ SRT file
                 output_filename = f"{sub.index}.mp3"
                 output_path = os.path.join(tts_dir, output_filename)
 
                 batch_data.append({
-                    'index': sub.index,  # Sử dụng index thực tế từ SRT
+                    'index': sub.index,
                     'text': clean_txt,
                     'voice': voice,
+                    'is_male': is_male,
+                    'start_sec': start_sec,
+                    'end_sec': end_sec,
+                    'slot_duration': slot_duration,
+                    'hard_limit': hard_limit,
+                    'available_space': available_space,
                     'output_path': output_path
                 })
 
@@ -127,15 +228,22 @@ async def tts_batch_processing(vi_srt_path):
             async def generate_with_limit(item):
                 async with semaphore:
                     try:
-                        success = await generate_tts_internal(
+                        result = await generate_tts_with_speedup(
                             item['text'],
                             item['voice'],
                             item['output_path'],
+                            item['available_space'],
                             rate="+0%"
                         )
-                        return item['index'], item['output_path'], success
+                        return item['index'], result
                     except Exception as e:
-                        return item['index'], item['output_path'], False
+                        return item['index'], {
+                            'success': False,
+                            'duration': 0,
+                            'speedup_percent': 0,
+                            'status': '❌',
+                            'audio_data': None
+                        }
 
             # Tạo tasks
             tasks = [generate_with_limit(item) for item in batch_data]
@@ -148,12 +256,35 @@ async def tts_batch_processing(vi_srt_path):
                     timeout=60 * len(batch_data)
                 )
 
-                # Đếm thành công/thất bại
-                for idx, output_path, success in results:
+                # Xử lý kết quả
+                for idx, result in results:
                     processed_count += 1
-                    if success and os.path.exists(output_path):
+
+                    if result['success']:
                         success_count += 1
-                        tts_files_list.append(output_path)
+
+                        # Lưu metadata
+                        item = next((x for x in batch_data if x['index'] == idx), None)
+                        if item:
+                            metadata[str(idx)] = {
+                                'start_sec': item['start_sec'],
+                                'end_sec': item['end_sec'],
+                                'slot_duration': item['slot_duration'],
+                                'hard_limit': item['hard_limit'],
+                                'available_space': item['available_space'],
+                                'actual_duration': result['duration'],
+                                'speedup_percent': result['speedup_percent'],
+                                'status': result['status']
+                            }
+
+                        if result['speedup_percent'] > 0:
+                            speedup_count += 1
+                            total_speedup_percent += result['speedup_percent']
+
+                        # Thêm vào danh sách kết quả
+                        output_file = os.path.join(tts_dir, f"{idx}.mp3")
+                        if os.path.exists(output_file):
+                            tts_files_list.append(output_file)
                     else:
                         failed_count += 1
 
@@ -163,18 +294,44 @@ async def tts_batch_processing(vi_srt_path):
                 continue
 
             batch_tts_time = time.time() - batch_start_time
-            print(f"   ⏱️ TTS time: {batch_tts_time:.1f}s | Avg: {batch_tts_time/len(batch_data):.2f}s/câu")
-            print(f"   ✓ Thành công: {success_count} | ❌ Thất bại: {failed_count} | 📊 Đã xử lý: {processed_count}/{total_subs}")
+            print(f"   ⏱️  TTS time: {batch_tts_time:.1f}s | Avg: {batch_tts_time/len(batch_data):.2f}s/câu")
+            print(f"   ✓ Thành công: {success_count} | ⚡ Tăng tốc: {speedup_count} | ❌ Thất bại: {failed_count}")
+            print(f"   📊 Đã xử lý: {processed_count}/{total_subs}")
+
+        # Lưu metadata (MERGE với metadata cũ nếu có)
+        import json
+
+        # Load metadata cũ nếu file đã tồn tại
+        existing_metadata = {}
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    existing_metadata = json.load(f)
+                print(f"\n   📖 Đã load {len(existing_metadata):,} entries từ metadata cũ")
+            except:
+                pass  # Nếu file lỗi thì bỏ qua
+
+        # Merge metadata mới vào metadata cũ
+        existing_metadata.update(metadata)
+
+        # Lưu metadata đầy đủ
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(existing_metadata, f, indent=2, ensure_ascii=False)
+
+        print(f"   💾 Đã lưu {len(existing_metadata):,} entries vào metadata (+ {len(metadata):,} mới)")
 
         elapsed = time.time() - start_time
+        avg_speedup = total_speedup_percent / speedup_count if speedup_count > 0 else 0
 
         print(f"\n{'='*70}")
-        print(f"✅ TTS HOÀN TẤT")
+        print(f"✅ TTS VỚI XỬ LÝ THỜI GIAN HOÀN TẤT")
         print(f"{'='*70}")
         print(f"   📁 Thư mục TTS: {tts_dir}")
         print(f"   📊 Tổng câu xử lý: {processed_count:,}/{total_subs:,}")
         print(f"   ✓ Thành công: {success_count:,} file MP3")
+        print(f"   ⚡ Đã tăng tốc: {speedup_count:,} file (trung bình: {avg_speedup:.1f}%)")
         print(f"   ❌ Thất bại: {failed_count:,} file")
+        print(f"   📄 Metadata: {os.path.basename(metadata_file)}")
         print(f"   ⏱️  Thời gian: {elapsed:.1f}s ({elapsed/60:.1f} phút)")
         if processed_count > 0:
             print(f"   ⚡ Tốc độ: {processed_count/elapsed:.1f} file/giây")
@@ -183,17 +340,21 @@ async def tts_batch_processing(vi_srt_path):
         return {
             "status": "success",
             "tts_directory": tts_dir,
+            "metadata_file": metadata_file,
             "total_files": total_subs,
             "processed": processed_count,
             "success": success_count,
             "failed": failed_count,
+            "speedup_count": speedup_count,
+            "avg_speedup_percent": round(avg_speedup, 1),
             "tts_files": tts_files_list,
+            "tts_ready_for_merge": True,
             "processing_time": elapsed
         }
 
     except Exception as e:
         print(f"\n{'='*70}")
-        print(f"❌ LỖI TTS CHO FILE VI")
+        print(f"❌ LỖI TTS VỚI XỬ LÝ THỜI GIAN")
         print(f"{'='*70}")
         print(f"   🔴 Lỗi: {str(e)}")
         print(f"   📂 File: {os.path.basename(vi_srt_path)}")
@@ -204,7 +365,7 @@ async def tts_batch_processing(vi_srt_path):
 @router.post("/api/v1/dubbing/tts-from-vi-srt")
 async def api_tts_from_vi_srt(req: TtsFromViSrtRequest):
     """
-    API tạo TTS từ file SRT VI có sẵn
+    API tạo TTS từ file SRT VI có sẵn với XỬ LÝ THỜI GIAN & TĂNG TỐC
 
     Request body:
     {
@@ -215,11 +376,15 @@ async def api_tts_from_vi_srt(req: TtsFromViSrtRequest):
     {
         "status": "success",
         "tts_directory": "/path/to/tts",
+        "metadata_file": "/path/to/tts/timing_metadata.json",
         "total_files": 150,
         "processed": 150,
         "success": 148,
         "failed": 2,
+        "speedup_count": 45,
+        "avg_speedup_percent": 23.5,
         "tts_files": ["tts/1.mp3", "tts/2.mp3", ...],
+        "tts_ready_for_merge": true,
         "processing_time": 120.5
     }
     """
@@ -232,16 +397,16 @@ async def api_tts_from_vi_srt(req: TtsFromViSrtRequest):
         if not path.endswith('.srt'):
             raise HTTPException(400, "File phải có định dạng .srt")
 
-        Logger.section("TTS TỪ FILE SRT VI")
+        Logger.section("TTS TỪ FILE SRT VI VỚI XỬ LÝ THỜI GIAN")
         print(f"   📂 Đầu vào: {os.path.basename(path)} ({os.path.getsize(path) / 1024:.2f} KB)")
 
         start_time = time.time()
 
-        # Chạy TTS batch processing
+        # Chạy TTS batch processing với logic timing & speedup
         result = await tts_batch_processing(path)
 
         elapsed = time.time() - start_time
-        Logger.success(f"TTS hoàn tất: {result['success']}/{result['total_files']} files", elapsed)
+        Logger.success(f"TTS hoàn tất: {result['success']}/{result['total_files']} files (⚡{result['speedup_count']} speedup)", elapsed)
 
         return result
 
