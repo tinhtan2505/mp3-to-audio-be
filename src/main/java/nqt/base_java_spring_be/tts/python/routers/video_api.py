@@ -140,8 +140,8 @@ def api_mix(req: MixRequest):
                     inputs.extend(["-i", voice, "-i", brand_img_path])
                     brand_idx = 2
 
-                filters.append(f"[{brand_idx}:v]scale=150:100[v_brand]")
-                filters.append(f"[v_delogo][v_brand]overlay=x=0:y=0[v_out]")
+                filters.append(f"[{brand_idx}:v]scale=80:80[v_brand]")
+                filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
                 video_map = "[v_out]"
             else:
                 print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")

@@ -203,7 +203,7 @@ def api_mix(req: MixRequest):
                     inputs.extend(["-i", voice, "-i", brand_img_path])
                     brand_idx = 2
 
-                filters.append(f"[{brand_idx}:v]scale=150:100[v_brand]")
+                filters.append(f"[{brand_idx}:v]scale=80:80[v_brand]")
                 filters.append(f"[{last_video_label}][v_brand]overlay=x=10:y=10[v_out]")
                 video_map = "[v_out]"
             else:
