@@ -124,6 +124,47 @@ def api_mix(req: MixRequest):
             print("   🛡️  Xóa Logo: BẬT")
             video_chain += f",delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}"
 
+            # Tạo watermark text bounce khi chạm viền (DVD screensaver effect)
+            if req.branding_text:
+                print(f"   💧 Watermark Text: '{req.branding_text}'")
+
+                # Random các thông số
+                font_size = 28
+                alpha = round(random.uniform(0.25, 0.35), 2)
+
+                # Random tốc độ và hướng ban đầu
+                speed_x = random.randint(50, 100)
+                speed_y = random.randint(50, 100)
+                direction_x = random.choice([1, -1])  # 1: phải, -1: trái
+                direction_y = random.choice([1, -1])  # 1: xuống, -1: lên
+
+                # Random vị trí bắt đầu
+                start_x = random.randint(0, 480)
+                start_y = random.randint(0, 480)
+
+                print(f"   📐 Font: {font_size}px | Alpha: {alpha} | Speed: ({speed_x},{speed_y})px/s")
+                print(f"   🎯 Start: ({start_x},{start_y}) | Direction: ({direction_x},{direction_y})")
+
+                # Escape text cho FFmpeg
+                escaped_text = req.branding_text.replace(':', '\\:').replace("'", "\\'")
+
+                # Triangle Wave Expression cho bounce effect
+                # abs(mod(x, 2*range) - range) tạo ra sóng tam giác từ 0 đến range
+                # Công thức: khi chạm biên, tự động đảo chiều
+
+                margin = 10  # Khoảng cách từ viền
+
+                # X: bounce giữa margin và (w - tw - margin)
+                range_x = f"w-tw-{margin*2}"
+                move_x = f"abs(mod({start_x}+{speed_x}*{direction_x}*t\\,2*({range_x}))-({range_x}))+{margin}"
+
+                # Y: bounce giữa margin và (h - th - margin)
+                range_y = f"h-th-{margin*2}"
+                move_y = f"abs(mod({start_y}+{speed_y}*{direction_y}*t\\,2*({range_y}))-({range_y}))+{margin}"
+
+                video_chain += f",drawtext=text='{escaped_text}':fontsize={font_size}:fontcolor=white@{alpha}:x='{move_x}':y='{move_y}':shadowcolor=black@0.3:shadowx=2:shadowy=2"
+
+
             brand_img_path = req.branding_image_path
             has_branding = brand_img_path and os.path.exists(brand_img_path)
 
