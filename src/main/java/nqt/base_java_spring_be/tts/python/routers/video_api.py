@@ -83,6 +83,20 @@ def api_mix(req: MixRequest):
         if total_duration:
             print(f"   ⏱️  Thời lượng video: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
 
+        # ============================================================
+        # CHỐNG BẢN QUYỀN - COLOR GRADING (Video)
+        # ============================================================
+        saturation = round(random.uniform(1.15, 1.35), 2)      # Tăng độ bão hòa 15-35%
+        contrast = round(random.uniform(1.08, 1.18), 2)        # Tăng độ tương phản 8-18%
+        brightness = round(random.uniform(0.02, 0.08), 3)      # Tăng độ sáng 2-8%
+        gamma = round(random.uniform(0.95, 1.05), 2)           # Điều chỉnh gamma
+
+        print(f"   🎨 COLOR GRADING:")
+        print(f"      • Saturation: {saturation}x")
+        print(f"      • Contrast: {contrast}x")
+        print(f"      • Brightness: +{brightness}")
+        print(f"      • Gamma: {gamma}")
+
         # Random giảm kích thước để tránh phát hiện bản quyền
         reduce_dimension = random.choice(['width', 'height'])
         reduce_pixels = random.randint(1, 5)
@@ -119,6 +133,8 @@ def api_mix(req: MixRequest):
                 video_chain = f"[0:v]scale=iw-{reduce_pixels}:ih"
             else:
                 video_chain = f"[0:v]scale=iw:ih-{reduce_pixels}"
+
+        video_chain += f",eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
 
         if req.remove_logo:
             print("   🛡️  Xóa Logo: BẬT")
@@ -215,7 +231,38 @@ def api_mix(req: MixRequest):
 
             filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[voice]")
             filters.append(f"[voice]asplit[v_trig][v_mix]")
-            filters.append(f"[{music_idx}:a]volume={m_vol}[bg]")
+
+            music_pitch = round(random.uniform(-0.4, 0.4), 2)       # Pitch shift
+            music_highpass = random.randint(60, 100)                # High-pass filter
+            music_lowpass = random.randint(15000, 18000)            # Low-pass filter
+
+            print(f"   🎵 AUDIO TRANSFORMATION (Music Only):")
+            print(f"      • Pitch Shift: {music_pitch:+.2f} semitones")
+            print(f"      • High-pass Filter: {music_highpass}Hz")
+            print(f"      • Low-pass Filter: {music_lowpass}Hz")
+
+            # XỬ LÝ MUSIC (ÁP DỤNG AUDIO TRANSFORMATION)
+            # Áp dụng: pitch shift + highpass + lowpass + volume
+            music_filter = f"[{music_idx}:a]"
+
+            # 1. Pitch shift (rubberband hoặc asetrate+atempo)
+            if music_pitch != 0:
+                # Sử dụng asetrate + atempo để pitch shift
+                # Công thức: rate_factor = 2^(semitones/12)
+                rate_factor = round(2 ** (music_pitch / 12), 4)
+                music_filter += f"asetrate=44100*{rate_factor},atempo={1/rate_factor},"
+
+            # 2. High-pass filter (loại bỏ tần số thấp dưới music_highpass Hz)
+            music_filter += f"highpass=f={music_highpass},"
+
+            # 3. Low-pass filter (loại bỏ tần số cao trên music_lowpass Hz)
+            music_filter += f"lowpass=f={music_lowpass},"
+
+            # 4. Volume
+            music_filter += f"volume={m_vol}[bg]"
+
+            filters.append(music_filter)
+
             filters.append(f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck]")
             filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
         else:
@@ -318,6 +365,17 @@ def api_mix(req: MixRequest):
             "status": "success",
             "output_file": out_file,
             "resize_info": f"Giảm {reduce_dimension} đi {reduce_pixels}px",
+            "color_grading": {
+                "saturation": saturation,
+                "contrast": contrast,
+                "brightness": brightness,
+                "gamma": gamma
+            },
+            "audio_transform": {
+                "music_pitch": music_pitch if has_music else None,
+                "music_highpass": music_highpass if has_music else None,
+                "music_lowpass": music_lowpass if has_music else None
+            } if has_music else None,
             "render_time": f"{render_time:.2f}s",
             "total_time": f"{total_time:.2f}s",
             "file_size_mb": f"{os.path.getsize(out_file) / 1024 / 1024:.2f}"
