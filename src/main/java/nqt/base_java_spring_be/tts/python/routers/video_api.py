@@ -149,8 +149,8 @@ def api_mix(req: MixRequest):
                 alpha = round(random.uniform(0.25, 0.35), 2)
 
                 # Random tốc độ và hướng ban đầu
-                speed_x = random.randint(50, 100)
-                speed_y = random.randint(50, 100)
+                speed_x = random.randint(48, 50)
+                speed_y = random.randint(48, 50)
                 direction_x = random.choice([1, -1])  # 1: phải, -1: trái
                 direction_y = random.choice([1, -1])  # 1: xuống, -1: lên
 
