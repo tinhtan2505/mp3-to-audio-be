@@ -194,12 +194,11 @@ def call_gemini_api(text_list):
             else:
                 print(f"      ❌ TẤT CẢ KEY ĐỀU HẾT QUOTA")
 
-            return None
+            return None, str(e)
 
         # Các lỗi khác
         print(f"      ❌ Gemini API lỗi: {str(e)[:100]}")
-        return None
-
+        return None, str(e)
 
 def translate_srt_file_simple(input_srt_path):
     """
@@ -238,6 +237,7 @@ def translate_srt_file_simple(input_srt_path):
         total_failed = 0
         total_mismatched = 0
         has_errors = False
+        error_log = []  # ← THÊM: Danh sách lưu các lỗi
 
         # Dịch từng batch
         for i in range(0, total_subs, TRANS_BATCH_SIZE):
@@ -251,33 +251,103 @@ def translate_srt_file_simple(input_srt_path):
             original_texts = [sub.text for sub in current_batch]
 
             # Gọi API dịch (có auto retry + key rotation)
-            translated_texts = call_gemini_api(original_texts)
+            result = call_gemini_api(original_texts)
 
             # Xử lý kết quả
-            if translated_texts is None:
-                print(f"      ⚠️  LỖI API: Giữ nguyên {batch_size} dòng gốc")
+            if result is None:
+                error_msg = "Không có response từ API"
+                print(f"      ⚠️  LỖI API: {error_msg} - Giữ nguyên {batch_size} dòng gốc")
                 total_failed += batch_size
                 has_errors = True
-            elif len(translated_texts) != batch_size:
-                print(f"      ⚠️  LỆCH DÒNG: Nhận {len(translated_texts)}/{batch_size} dòng - Giữ nguyên text gốc")
-                total_mismatched += batch_size
+                # ← THÊM: Ghi log lỗi
+                error_log.append({
+                    'batch': (i//TRANS_BATCH_SIZE)+1,
+                    'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
+                    'error': error_msg,
+                    'timestamp': time.strftime('%H:%M:%S')
+                })
+
+            elif isinstance(result, tuple):  # Có lỗi cụ thể
+                translated_texts, error_msg = result
+                print(f"      ⚠️  LỖI API: {error_msg[:150]} - Giữ nguyên {batch_size} dòng gốc")
+                total_failed += batch_size
                 has_errors = True
+                # ← THÊM: Ghi log lỗi
+                error_log.append({
+                    'batch': (i//TRANS_BATCH_SIZE)+1,
+                    'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
+                    'error': error_msg,
+                    'timestamp': time.strftime('%H:%M:%S')
+                })
+
             else:
-                # Thành công - cập nhật text
-                for j, new_text in enumerate(translated_texts):
-                    if i + j < total_subs:
-                        subs[i + j].text = new_text
-                total_translated += batch_size
-                print(f"      ✓ Hoàn thành: {batch_size} dòng trong {time.time() - batch_start:.2f}s")
+                translated_texts = result
+                if len(translated_texts) != batch_size:
+                    error_msg = f"Lệch số dòng: Nhận {len(translated_texts)}/{batch_size}"
+                    print(f"      ⚠️  LỆCH DÒNG: Nhận {len(translated_texts)}/{batch_size} dòng - Giữ nguyên text gốc")
+                    total_mismatched += batch_size
+                    has_errors = True
+                    # ← THÊM: Ghi log lỗi
+                    error_log.append({
+                        'batch': (i//TRANS_BATCH_SIZE)+1,
+                        'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
+                        'error': error_msg,
+                        'timestamp': time.strftime('%H:%M:%S')
+                    })
+                else:
+                    # Thành công - cập nhật text
+                    for j, new_text in enumerate(translated_texts):
+                        if i + j < total_subs:
+                            subs[i + j].text = new_text
+                    total_translated += batch_size
+                    print(f"      ✓ Hoàn thành: {batch_size} dòng trong {time.time() - batch_start:.2f}s")
 
             # Lưu tạm sau mỗi batch
             subs.save(output_path, encoding='utf-8')
 
-        # Đổi tên file nếu có lỗi
+        # ========== XỬ LÝ KHI CÓ LỖI ==========
         if has_errors:
             error_path = output_path.replace('.srt', '_[ERROR].srt')
+
+            # ← THAY ĐỔI: Thay vì copy file gốc, tạo file error report
+            error_report_path = output_path.replace('.srt', '_ERROR_LOG.txt')
+
+            with open(error_report_path, 'w', encoding='utf-8') as f:
+                f.write("=" * 70 + "\n")
+                f.write("BÁO CÁO LỖI DỊCH FILE SRT\n")
+                f.write("=" * 70 + "\n\n")
+
+                f.write(f"📂 File gốc: {os.path.basename(input_srt_path)}\n")
+                f.write(f"📝 File đầu ra: {os.path.basename(error_path)}\n")
+                f.write(f"⏱️  Thời gian: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+                f.write("📊 THỐNG KÊ:\n")
+                f.write(f"   • Tổng số dòng: {total_subs}\n")
+                f.write(f"   • Dịch thành công: {total_translated}\n")
+                f.write(f"   • Lỗi API: {total_failed}\n")
+                f.write(f"   • Lệch dòng: {total_mismatched}\n")
+                f.write(f"   • Tổng lỗi: {len(error_log)}\n\n")
+
+                f.write("=" * 70 + "\n")
+                f.write("CHI TIẾT CÁC LỖI\n")
+                f.write("=" * 70 + "\n\n")
+
+                for idx, err in enumerate(error_log, 1):
+                    f.write(f"[{idx}] Batch {err['batch']} | Dòng {err['lines']} | {err['timestamp']}\n")
+                    f.write(f"    Lỗi: {err['error']}\n\n")
+
+                f.write("=" * 70 + "\n")
+                f.write(f"🔑 THÔNG TIN KEY:\n")
+                f.write(f"   • Tổng số key: {len(GEMINI_API_KEYS)}\n")
+                f.write(f"   • Key đã fail: {len(GEMINI_STATE['failed_keys'])}\n")
+                f.write(f"   • Key cuối dùng: #{GEMINI_STATE['current_key_index']+1}\n")
+                f.write("=" * 70 + "\n")
+
+            # Đổi tên file output thành ERROR
             os.rename(output_path, error_path)
             output_path = error_path
+
+            print(f"\n   📄 Đã tạo báo cáo lỗi: {os.path.basename(error_report_path)}")
 
         translate_elapsed = time.time() - translate_start
 
@@ -293,6 +363,8 @@ def translate_srt_file_simple(input_srt_path):
         print(f"   ⏱️  Thời gian dịch: {translate_elapsed:.2f}s ({translate_elapsed/60:.1f} phút)")
         if total_translated > 0:
             print(f"   ⚡ Tốc độ: {total_translated/(translate_elapsed/60):.1f} dòng/phút")
+        if has_errors:
+            print(f"   📄 Báo cáo lỗi: {os.path.basename(error_report_path)}")
         print(f"{'='*70}\n")
 
         # Trả về None nếu có lỗi, để không trigger TTS
@@ -309,7 +381,6 @@ def translate_srt_file_simple(input_srt_path):
         print(f"   📂 File: {os.path.basename(input_srt_path)}")
         print(f"{'='*70}\n")
         return None
-
 
 # ============================================================================
 # TTS FUNCTIONS - XỬ LÝ THỜI GIAN & TĂNG TỐC AUDIO
