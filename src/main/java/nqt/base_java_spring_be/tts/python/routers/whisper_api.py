@@ -125,11 +125,12 @@ def format_timestamp(seconds):
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-
-def call_gemini_api(text_list):
+def call_gemini_api(text_list, max_retries=3):
     """
-    Gửi yêu cầu dịch KHÔNG retry - chỉ gọi 1 lần
-    Nếu lỗi 429 thì rotate key và return None ngay
+    Gửi yêu cầu dịch với retry logic:
+    - Retry khi gặp 429 (sau khi rotate key) - mỗi key có max_retries lần thử
+    - Retry khi response không hợp lệ
+    - Max 3 lần retry cho mỗi key
     """
     if not GEMINI_API_KEYS:
         return None
@@ -138,71 +139,86 @@ def call_gemini_api(text_list):
     for i, txt in enumerate(text_list):
         prompt_content += f"Line_{i}: {txt}\n"
 
-    current_client = AI_MODELS.get("gemini_client")
-    current_key_index = GEMINI_STATE['current_key_index']
+    # Đếm số lần đã thử trên TẤT CẢ các key
+    total_attempts = 0
+    max_total_attempts = len(GEMINI_API_KEYS) * max_retries if GEMINI_API_KEYS else max_retries
 
-    try:
-        # Nếu client chưa có, lấy client mới
-        if not current_client:
-            current_client, current_key_index = get_next_gemini_client()
+    while total_attempts < max_total_attempts:
+        current_client = AI_MODELS.get("gemini_client")
+        current_key_index = GEMINI_STATE['current_key_index']
+
+        try:
+            # Nếu client chưa có, lấy client mới
             if not current_client:
-                print(f"      ❌ Không còn key khả dụng")
-                return None
-            AI_MODELS["gemini_client"] = current_client
+                current_client, current_key_index = get_next_gemini_client()
+                if not current_client:
+                    print(f"      ❌ Không còn key khả dụng")
+                    return None
+                AI_MODELS["gemini_client"] = current_client
 
-        time.sleep(TRANS_DELAY_SECONDS_GEMINI)
+            time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
-        response = current_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt_content,
-            config=GenerateContentConfig(
-                temperature=0.1,
-                system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
+            response = current_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_content,
+                config=GenerateContentConfig(
+                    temperature=0.1,
+                    system_instruction=SYSTEM_INSTRUCTION_TRANS_GEMINI
+                )
             )
-        )
 
-        if not hasattr(response, 'text'):
-            print(f"      ⚠️  Response không có text")
-            return None
+            if not hasattr(response, 'text'):
+                total_attempts += 1
+                print(f"      ⚠️  Response không có text - Retry {total_attempts}/{max_total_attempts}")
+                time.sleep(1)
+                continue
 
-        raw_text = response.text.strip()
-        translated_lines = []
+            raw_text = response.text.strip()
+            translated_lines = []
 
-        for line in raw_text.split('\n'):
-            clean_line = line.strip()
-            if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
-                clean_line = clean_line.split(":", 1)[1].strip()
-            elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
-                clean_line = clean_line.split(' ', 1)[1].strip()
-            if clean_line:
-                translated_lines.append(clean_line)
+            for line in raw_text.split('\n'):
+                clean_line = line.strip()
+                if ":" in clean_line and (clean_line.startswith("Line") or clean_line[0].isdigit()):
+                    clean_line = clean_line.split(":", 1)[1].strip()
+                elif len(clean_line) > 2 and clean_line[0].isdigit() and clean_line[1] in ['.', ')']:
+                    clean_line = clean_line.split(' ', 1)[1].strip()
+                if clean_line:
+                    translated_lines.append(clean_line)
 
-        return translated_lines
+            return translated_lines
 
-    except Exception as e:
-        error_msg = str(e).lower()
+        except Exception as e:
+            total_attempts += 1  # ← CHỈ TĂNG 1 LẦN Ở ĐÂY
+            error_msg = str(e).lower()
 
-        # Phát hiện lỗi 429 (quota exceeded) -> rotate key
-        if "429" in error_msg or "quota" in error_msg or "resource_exhausted" in error_msg:
-            print(f"      ⚠️  Key #{current_key_index+1} hết quota (429) - Đánh dấu key fail")
-            mark_key_as_failed(current_key_index)
+            # Phát hiện lỗi 429 (quota exceeded) -> rotate key
+            if "429" in error_msg or "quota" in error_msg or "resource_exhausted" in error_msg:
+                print(f"      ⚠️  Key #{current_key_index+1} hết quota (429) - Đánh dấu key fail")
+                mark_key_as_failed(current_key_index)
 
-            # Rotate sang key tiếp theo cho lần gọi sau
-            next_client, next_key_index = rotate_to_next_key()
-            if next_client:
-                AI_MODELS["gemini_client"] = next_client
-            else:
-                print(f"      ❌ TẤT CẢ KEY ĐỀU HẾT QUOTA")
+                # Rotate sang key tiếp theo
+                next_client, next_key_index = rotate_to_next_key()
+                if next_client:
+                    AI_MODELS["gemini_client"] = next_client
+                    print(f"      🔄 Retry với key #{next_key_index+1} (lần thử {total_attempts}/{max_total_attempts})...")
+                    continue  # Retry với key mới
+                else:
+                    print(f"      ❌ TẤT CẢ KEY ĐỀU HẾT QUOTA sau {total_attempts} lần thử")
+                    return None
 
-            return None, str(e)
+            # Các lỗi khác - retry
+            print(f"      ❌ Gemini API lỗi: {str(e)[:100]} - Retry {total_attempts}/{max_total_attempts}")
+            if total_attempts >= max_total_attempts:
+                print(f"      ❌ Đã hết số lần retry ({max_total_attempts})")
+                return None
+            time.sleep(2)  # Đợi 2s trước khi retry
 
-        # Các lỗi khác
-        print(f"      ❌ Gemini API lỗi: {str(e)[:100]}")
-        return None, str(e)
+    print(f"      ❌ Đã thử {total_attempts} lần nhưng vẫn thất bại")
+    return None
 
 def translate_srt_file_simple(input_srt_path):
     """
-    Dịch file SRT sang tiếng Việt với auto key rotation
+    Dịch file SRT sang tiếng Việt với auto key rotation + retry logic
     """
     translate_start = time.time()
 
@@ -237,7 +253,7 @@ def translate_srt_file_simple(input_srt_path):
         total_failed = 0
         total_mismatched = 0
         has_errors = False
-        error_log = []  # ← THÊM: Danh sách lưu các lỗi
+        error_log = []
 
         # Dịch từng batch
         for i in range(0, total_subs, TRANS_BATCH_SIZE):
@@ -250,16 +266,15 @@ def translate_srt_file_simple(input_srt_path):
             # Lấy text gốc
             original_texts = [sub.text for sub in current_batch]
 
-            # Gọi API dịch (có auto retry + key rotation)
-            result = call_gemini_api(original_texts)
+            # Gọi API dịch (có auto retry)
+            translated_texts = call_gemini_api(original_texts, max_retries=2)
 
             # Xử lý kết quả
-            if result is None:
-                error_msg = "Không có response từ API"
+            if translated_texts is None:
+                error_msg = "Không có response từ API sau khi retry"
                 print(f"      ⚠️  LỖI API: {error_msg} - Giữ nguyên {batch_size} dòng gốc")
                 total_failed += batch_size
                 has_errors = True
-                # ← THÊM: Ghi log lỗi
                 error_log.append({
                     'batch': (i//TRANS_BATCH_SIZE)+1,
                     'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
@@ -267,40 +282,39 @@ def translate_srt_file_simple(input_srt_path):
                     'timestamp': time.strftime('%H:%M:%S')
                 })
 
-            elif isinstance(result, tuple):  # Có lỗi cụ thể
-                translated_texts, error_msg = result
-                print(f"      ⚠️  LỖI API: {error_msg[:150]} - Giữ nguyên {batch_size} dòng gốc")
-                total_failed += batch_size
-                has_errors = True
-                # ← THÊM: Ghi log lỗi
-                error_log.append({
-                    'batch': (i//TRANS_BATCH_SIZE)+1,
-                    'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
-                    'error': error_msg,
-                    'timestamp': time.strftime('%H:%M:%S')
-                })
+            elif len(translated_texts) != batch_size:
+                # LỆCH DÒNG - RETRY 1 LẦN
+                error_msg = f"Lệch số dòng: Nhận {len(translated_texts)}/{batch_size}"
+                print(f"      ⚠️  {error_msg} - Retry lần 1...")
 
-            else:
-                translated_texts = result
-                if len(translated_texts) != batch_size:
-                    error_msg = f"Lệch số dòng: Nhận {len(translated_texts)}/{batch_size}"
-                    print(f"      ⚠️  LỆCH DÒNG: Nhận {len(translated_texts)}/{batch_size} dòng - Giữ nguyên text gốc")
-                    total_mismatched += batch_size
-                    has_errors = True
-                    # ← THÊM: Ghi log lỗi
-                    error_log.append({
-                        'batch': (i//TRANS_BATCH_SIZE)+1,
-                        'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
-                        'error': error_msg,
-                        'timestamp': time.strftime('%H:%M:%S')
-                    })
-                else:
-                    # Thành công - cập nhật text
-                    for j, new_text in enumerate(translated_texts):
+                time.sleep(1)
+                retry_translated = call_gemini_api(original_texts, max_retries=1)
+
+                if retry_translated and len(retry_translated) == batch_size:
+                    # Retry thành công
+                    for j, new_text in enumerate(retry_translated):
                         if i + j < total_subs:
                             subs[i + j].text = new_text
                     total_translated += batch_size
-                    print(f"      ✓ Hoàn thành: {batch_size} dòng trong {time.time() - batch_start:.2f}s")
+                    print(f"      ✓ Retry thành công: {batch_size} dòng trong {time.time() - batch_start:.2f}s")
+                else:
+                    # Retry vẫn thất bại
+                    print(f"      ❌ Retry thất bại - Giữ nguyên text gốc")
+                    total_mismatched += batch_size
+                    has_errors = True
+                    error_log.append({
+                        'batch': (i//TRANS_BATCH_SIZE)+1,
+                        'lines': f"{i+1}-{min(i + TRANS_BATCH_SIZE, total_subs)}",
+                        'error': f"{error_msg} (retry failed)",
+                        'timestamp': time.strftime('%H:%M:%S')
+                    })
+            else:
+                # Thành công - cập nhật text
+                for j, new_text in enumerate(translated_texts):
+                    if i + j < total_subs:
+                        subs[i + j].text = new_text
+                total_translated += batch_size
+                print(f"      ✓ Hoàn thành: {batch_size} dòng trong {time.time() - batch_start:.2f}s")
 
             # Lưu tạm sau mỗi batch
             subs.save(output_path, encoding='utf-8')
@@ -308,8 +322,6 @@ def translate_srt_file_simple(input_srt_path):
         # ========== XỬ LÝ KHI CÓ LỖI ==========
         if has_errors:
             error_path = output_path.replace('.srt', '_[ERROR].srt')
-
-            # ← THAY ĐỔI: Thay vì copy file gốc, tạo file error report
             error_report_path = output_path.replace('.srt', '_ERROR_LOG.txt')
 
             with open(error_report_path, 'w', encoding='utf-8') as f:
@@ -343,10 +355,8 @@ def translate_srt_file_simple(input_srt_path):
                 f.write(f"   • Key cuối dùng: #{GEMINI_STATE['current_key_index']+1}\n")
                 f.write("=" * 70 + "\n")
 
-            # Đổi tên file output thành ERROR
             os.rename(output_path, error_path)
             output_path = error_path
-
             print(f"\n   📄 Đã tạo báo cáo lỗi: {os.path.basename(error_report_path)}")
 
         translate_elapsed = time.time() - translate_start
@@ -367,7 +377,6 @@ def translate_srt_file_simple(input_srt_path):
             print(f"   📄 Báo cáo lỗi: {os.path.basename(error_report_path)}")
         print(f"{'='*70}\n")
 
-        # Trả về None nếu có lỗi, để không trigger TTS
         if has_errors:
             return None
 

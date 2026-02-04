@@ -6,6 +6,7 @@ import asyncio
 import uuid
 import librosa
 import numpy as np
+import json
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from config import VOICE_MALE, VOICE_FEMALE, SAMPLE_RATE
@@ -18,7 +19,7 @@ class TtsFromViSrtRequest(BaseModel):
     vi_srt_path: str  # Đường dẫn đến file SRT VI
 
 
-async def generate_tts_with_speedup(text, voice, output_file, available_space, rate="+0%"):
+async def generate_tts_with_speedup(text, voice, output_file, available_space, rate="+0%", metadata_cache=None):
     """
     Tạo TTS với tự động tăng tốc nếu audio quá dài
 
@@ -28,15 +29,52 @@ async def generate_tts_with_speedup(text, voice, output_file, available_space, r
         output_file: Đường dẫn file MP3 đầu ra
         available_space: Thời gian khả dụng (giây)
         rate: Tốc độ ban đầu
+        metadata_cache: Dict chứa metadata đã lưu (để tránh load lại file)
 
     Returns:
         dict: {
             'success': bool,
             'duration': float,  # Thời lượng audio thực tế
             'speedup_percent': int,  # % tăng tốc đã áp dụng
-            'status': str  # ✓ hoặc ⚡X%
+            'status': str  # ✓ hoặc ⚡X% hoặc ⏭️
+            'skipped': bool  # True nếu file đã tồn tại
         }
     """
+    # Kiểm tra file đã tồn tại
+    if os.path.exists(output_file):
+        # Ưu tiên dùng metadata cache nếu có (NHANH)
+        if metadata_cache:
+            return {
+                'success': True,
+                'duration': metadata_cache.get('actual_duration', 0),
+                'speedup_percent': metadata_cache.get('speedup_percent', 0),
+                'status': '⏭️',
+                'audio_data': None,  # Không cần load audio
+                'skipped': True
+            }
+
+        # Fallback: load file nếu không có metadata (CHẬM)
+        try:
+            y, _ = librosa.load(output_file, sr=SAMPLE_RATE)
+            y_trimmed, _ = librosa.effects.trim(y, top_db=30)
+            duration = len(y_trimmed) / SAMPLE_RATE
+
+            return {
+                'success': True,
+                'duration': duration,
+                'speedup_percent': 0,
+                'status': '⏭️',
+                'audio_data': y_trimmed,
+                'skipped': True
+            }
+        except Exception as e:
+            # Nếu file lỗi thì xóa và tạo lại
+            print(f"      ⚠️ File {os.path.basename(output_file)} lỗi, sẽ tạo lại: {str(e)[:50]}")
+            try:
+                os.remove(output_file)
+            except:
+                pass
+
     MAX_SPEED_UP = 60
     tmp_file = f"temp_{uuid.uuid4().hex}.mp3"
 
@@ -73,8 +111,6 @@ async def generate_tts_with_speedup(text, voice, output_file, available_space, r
         final_duration = len(y_trimmed) / SAMPLE_RATE
 
         # Chuyển sang file đầu ra cuối cùng
-        if os.path.exists(output_file):
-            os.remove(output_file)
         os.rename(tmp_file, output_file)
 
         return {
@@ -82,19 +118,24 @@ async def generate_tts_with_speedup(text, voice, output_file, available_space, r
             'duration': final_duration,
             'speedup_percent': speedup_percent,
             'status': status,
-            'audio_data': y_trimmed  # Có thể dùng để ghép file tổng sau này
+            'audio_data': y_trimmed,
+            'skipped': False
         }
 
     except Exception as e:
         print(f"      ❌ TTS error: {str(e)[:100]}")
         if os.path.exists(tmp_file):
-            os.remove(tmp_file)
+            try:
+                os.remove(tmp_file)
+            except:
+                pass
         return {
             'success': False,
             'duration': 0,
             'speedup_percent': 0,
             'status': '❌',
-            'audio_data': None
+            'audio_data': None,
+            'skipped': False
         }
 
 
@@ -132,6 +173,24 @@ async def tts_batch_processing(vi_srt_path):
 
         total_subs = len(subs)
 
+        # Load metadata cũ TRƯỚC KHI BẮT ĐẦU XỬ LÝ (quan trọng!)
+        metadata_file = os.path.join(tts_dir, "timing_metadata.json")
+        existing_metadata = {}
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    existing_metadata = json.load(f)
+                print(f"   📖 Đã load {len(existing_metadata):,} entries từ metadata cũ")
+            except Exception as e:
+                print(f"   ⚠️ Không thể load metadata cũ: {str(e)[:50]}")
+
+        # Đếm số file đã tồn tại
+        existing_files = 0
+        for sub in subs:
+            output_file = os.path.join(tts_dir, f"{sub.index}.mp3")
+            if os.path.exists(output_file):
+                existing_files += 1
+
         # Tự động tính BATCH_SIZE
         if total_subs < 100:
             BATCH_SIZE = 20
@@ -148,22 +207,28 @@ async def tts_batch_processing(vi_srt_path):
         SAFETY_GAP = 0.1  # Khoảng cách an toàn giữa các câu
 
         print(f"   • Tổng câu: {total_subs:,}")
+        print(f"   • Đã tồn tại: {existing_files:,} file MP3 ⏭️")
+        print(f"   • Cần tạo mới: {total_subs - existing_files:,} file")
         print(f"   • Batch size: {BATCH_SIZE} câu/lần")
         print(f"   • Số batch: {(total_subs + BATCH_SIZE - 1) // BATCH_SIZE}")
         print(f"   • Max concurrent: {MAX_CONCURRENT_TASKS}")
         print(f"   • Safety gap: {SAFETY_GAP}s")
-        print(f"   • Ước tính thời gian: ~{(total_subs / BATCH_SIZE * 0.8):.0f}s ({(total_subs / BATCH_SIZE * 0.8 / 60):.1f} phút)\n")
+        remaining = total_subs - existing_files
+        if remaining > 0:
+            print(f"   • Ước tính thời gian: ~{(remaining / BATCH_SIZE * 0.8):.0f}s ({(remaining / BATCH_SIZE * 0.8 / 60):.1f} phút)\n")
+        else:
+            print(f"   • ✅ Tất cả file đã tồn tại, chỉ cần load metadata\n")
 
         processed_count = 0
         success_count = 0
         failed_count = 0
+        skipped_count = 0
         speedup_count = 0
         total_speedup_percent = 0
         tts_files_list = []
 
-        # Tạo file JSON metadata để lưu thông tin timing
-        metadata_file = os.path.join(tts_dir, "timing_metadata.json")
-        metadata = {}
+        # Dictionary để lưu metadata MỚI của batch hiện tại
+        new_metadata = {}
 
         # Xử lý từng batch
         for batch_start in range(0, total_subs, BATCH_SIZE):
@@ -228,12 +293,17 @@ async def tts_batch_processing(vi_srt_path):
             async def generate_with_limit(item):
                 async with semaphore:
                     try:
+                        # Lấy metadata cache nếu có (để tránh load file)
+                        idx_str = str(item['index'])
+                        metadata_cache = existing_metadata.get(idx_str, None)
+
                         result = await generate_tts_with_speedup(
                             item['text'],
                             item['voice'],
                             item['output_path'],
                             item['available_space'],
-                            rate="+0%"
+                            rate="+0%",
+                            metadata_cache=metadata_cache  # Truyền cache vào
                         )
                         return item['index'], result
                     except Exception as e:
@@ -242,7 +312,8 @@ async def tts_batch_processing(vi_srt_path):
                             'duration': 0,
                             'speedup_percent': 0,
                             'status': '❌',
-                            'audio_data': None
+                            'audio_data': None,
+                            'skipped': False
                         }
 
             # Tạo tasks
@@ -263,19 +334,27 @@ async def tts_batch_processing(vi_srt_path):
                     if result['success']:
                         success_count += 1
 
+                        # Đếm số file bị skip
+                        if result.get('skipped', False):
+                            skipped_count += 1
+
                         # Lưu metadata
                         item = next((x for x in batch_data if x['index'] == idx), None)
                         if item:
-                            metadata[str(idx)] = {
-                                'start_sec': item['start_sec'],
-                                'end_sec': item['end_sec'],
-                                'slot_duration': item['slot_duration'],
-                                'hard_limit': item['hard_limit'],
-                                'available_space': item['available_space'],
-                                'actual_duration': result['duration'],
-                                'speedup_percent': result['speedup_percent'],
-                                'status': result['status']
-                            }
+                            # CHỈ LƯU METADATA MỚI CHO FILE KHÔNG SKIP
+                            # File skip sẽ giữ nguyên metadata cũ
+                            if not result.get('skipped', False):
+                                new_metadata[str(idx)] = {
+                                    'start_sec': item['start_sec'],
+                                    'end_sec': item['end_sec'],
+                                    'slot_duration': item['slot_duration'],
+                                    'hard_limit': item['hard_limit'],
+                                    'available_space': item['available_space'],
+                                    'actual_duration': result['duration'],
+                                    'speedup_percent': result['speedup_percent'],
+                                    'status': result['status'],
+                                    'skipped': False
+                                }
 
                         if result['speedup_percent'] > 0:
                             speedup_count += 1
@@ -295,30 +374,19 @@ async def tts_batch_processing(vi_srt_path):
 
             batch_tts_time = time.time() - batch_start_time
             print(f"   ⏱️  TTS time: {batch_tts_time:.1f}s | Avg: {batch_tts_time/len(batch_data):.2f}s/câu")
-            print(f"   ✓ Thành công: {success_count} | ⚡ Tăng tốc: {speedup_count} | ❌ Thất bại: {failed_count}")
+            print(f"   ✓ Thành công: {success_count} | ⏭️ Đã tồn tại: {skipped_count} | ⚡ Tăng tốc: {speedup_count} | ❌ Thất bại: {failed_count}")
             print(f"   📊 Đã xử lý: {processed_count}/{total_subs}")
 
-        # Lưu metadata (MERGE với metadata cũ nếu có)
-        import json
-
-        # Load metadata cũ nếu file đã tồn tại
-        existing_metadata = {}
-        if os.path.exists(metadata_file):
-            try:
-                with open(metadata_file, 'r', encoding='utf-8') as f:
-                    existing_metadata = json.load(f)
-                print(f"\n   📖 Đã load {len(existing_metadata):,} entries từ metadata cũ")
-            except:
-                pass  # Nếu file lỗi thì bỏ qua
-
         # Merge metadata mới vào metadata cũ
-        existing_metadata.update(metadata)
+        existing_metadata.update(new_metadata)
 
         # Lưu metadata đầy đủ
-        with open(metadata_file, 'w', encoding='utf-8') as f:
-            json.dump(existing_metadata, f, indent=2, ensure_ascii=False)
-
-        print(f"   💾 Đã lưu {len(existing_metadata):,} entries vào metadata (+ {len(metadata):,} mới)")
+        try:
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(existing_metadata, f, indent=2, ensure_ascii=False)
+            print(f"\n   💾 Đã lưu {len(existing_metadata):,} entries vào metadata (+ {len(new_metadata):,} mới)")
+        except Exception as e:
+            print(f"\n   ⚠️ Không thể lưu metadata: {str(e)}")
 
         elapsed = time.time() - start_time
         avg_speedup = total_speedup_percent / speedup_count if speedup_count > 0 else 0
@@ -329,6 +397,8 @@ async def tts_batch_processing(vi_srt_path):
         print(f"   📁 Thư mục TTS: {tts_dir}")
         print(f"   📊 Tổng câu xử lý: {processed_count:,}/{total_subs:,}")
         print(f"   ✓ Thành công: {success_count:,} file MP3")
+        print(f"   ⏭️ Đã tồn tại (skip): {skipped_count:,} file")
+        print(f"   🆕 Tạo mới: {success_count - skipped_count:,} file")
         print(f"   ⚡ Đã tăng tốc: {speedup_count:,} file (trung bình: {avg_speedup:.1f}%)")
         print(f"   ❌ Thất bại: {failed_count:,} file")
         print(f"   📄 Metadata: {os.path.basename(metadata_file)}")
@@ -344,6 +414,8 @@ async def tts_batch_processing(vi_srt_path):
             "total_files": total_subs,
             "processed": processed_count,
             "success": success_count,
+            "skipped": skipped_count,
+            "created": success_count - skipped_count,
             "failed": failed_count,
             "speedup_count": speedup_count,
             "avg_speedup_percent": round(avg_speedup, 1),
@@ -380,6 +452,8 @@ async def api_tts_from_vi_srt(req: TtsFromViSrtRequest):
         "total_files": 150,
         "processed": 150,
         "success": 148,
+        "skipped": 45,
+        "created": 103,
         "failed": 2,
         "speedup_count": 45,
         "avg_speedup_percent": 23.5,
@@ -406,7 +480,7 @@ async def api_tts_from_vi_srt(req: TtsFromViSrtRequest):
         result = await tts_batch_processing(path)
 
         elapsed = time.time() - start_time
-        Logger.success(f"TTS hoàn tất: {result['success']}/{result['total_files']} files (⚡{result['speedup_count']} speedup)", elapsed)
+        Logger.success(f"TTS hoàn tất: {result['success']}/{result['total_files']} files (⚡{result['speedup_count']} speedup, ⏭️{result['skipped']} skip)", elapsed)
 
         return result
 
