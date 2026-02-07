@@ -18,3 +18,4 @@ google.generativeai
 google.api_core
 openai
 deep_translator
+yt-dlp
