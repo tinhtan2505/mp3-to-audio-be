@@ -5,6 +5,7 @@ import librosa
 import soundfile as sf
 import numpy as np
 import pysrt
+import glob
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from config import SAMPLE_RATE
@@ -166,8 +167,23 @@ async def api_tts_batch_from_files_v2(req: TtsBatchFromFilesRequest):
         # Lưu file cuối
         final_valid_len = int(subs[-1].end.ordinal/1000 * SAMPLE_RATE) + int(0.5 * SAMPLE_RATE)
         final_audio = final_audio[:final_valid_len]
-        out_name = f"{path.replace('.srt', '')}_audio_final_{get_timestamp_str()}.wav"
+
+        # Tên file cố định
+        srt_dir = os.path.dirname(path)
+        out_name = os.path.join(srt_dir, "vocals_vi_audio.wav")
         sf.write(out_name, final_audio, SAMPLE_RATE)
+
+        # Xóa các file checkpoint đã tạo
+        checkpoint_pattern = path.replace('.srt', '') + '_checkpoint_*.wav'
+        checkpoint_files = glob.glob(checkpoint_pattern)
+        if checkpoint_files:
+            print(f"\n🗑️  Đang xóa {len(checkpoint_files)} file checkpoint...")
+            for checkpoint_file in checkpoint_files:
+                try:
+                    os.remove(checkpoint_file)
+                    print(f"   ✓ Đã xóa: {os.path.basename(checkpoint_file)}")
+                except Exception as e:
+                    print(f"   ⚠️  Không thể xóa {os.path.basename(checkpoint_file)}: {e}")
 
         elapsed = time.time() - start_time
 
