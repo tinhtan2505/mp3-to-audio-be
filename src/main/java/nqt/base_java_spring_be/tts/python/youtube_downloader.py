@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-YouTube Downloader - Phiên bản cuối cùng
-Hỗ trợ đầy đủ các chất lượng video và audio
+YouTube Downloader - Phiên bản cải tiến
+Tải video không tiếng (mp4) + audio chất lượng cao (AAC/M4A) cho faster_whisper
 Yêu cầu: pip install yt-dlp, ffmpeg
 """
 
@@ -32,11 +32,11 @@ def get_quality_label(height):
     if height >= 2160:
         return "4K"
     elif height >= 1920:
-        return "Full HD"  # 1920p = 1080p Full HD
+        return "Full HD"
     elif height >= 1440:
         return "2K"
     elif height >= 1280:
-        return "Full HD"  # 1280p cũng coi là Full HD
+        return "Full HD"
     elif height >= 1080:
         return "Full HD"
     elif height >= 720:
@@ -60,7 +60,7 @@ def display_formats(info):
     video_formats = {}
     audio_formats = {}
 
-    # Lọc VIDEO formats
+    # Lọc VIDEO formats (chỉ video-only, không có audio)
     for f in formats:
         format_id = f.get('format_id', '')
         ext = f.get('ext', '')
@@ -71,15 +71,13 @@ def display_formats(info):
         tbr = f.get('tbr', 0)
         fps = f.get('fps', 0)
 
-        # Lấy video formats (cả video-only và combined)
-        if vcodec != 'none' and height and ext in ['mp4', 'webm']:
-            # Ưu tiên: combined stream > video-only, mp4 > webm
-            has_audio = acodec != 'none'
+        # Lấy video formats (CHỈ video-only, không có audio)
+        if vcodec != 'none' and acodec == 'none' and height and ext in ['mp4', 'webm']:
+            # Ưu tiên: mp4 > webm
             ext_score = 100 if ext == 'mp4' else 0
-            quality_score = (vbr or tbr or 0) + (1000 if has_audio else 0) + ext_score
+            quality_score = (vbr or tbr or 0) + ext_score
 
             # Nhóm các độ phân giải tương tự
-            # 1920p và 1080p -> cùng nhóm Full HD
             if height >= 1920:
                 key = 1920
             elif height >= 1280:
@@ -99,11 +97,10 @@ def display_formats(info):
                     'ext': 'mp4',
                     'height': height,
                     'score': quality_score,
-                    'has_audio': has_audio,
                     'fps': fps
                 }
 
-    # Lọc AUDIO formats
+    # Lọc AUDIO formats - Ưu tiên AAC chất lượng cao
     for f in formats:
         format_id = f.get('format_id', '')
         ext = f.get('ext', '')
@@ -116,10 +113,14 @@ def display_formats(info):
             if abr:
                 bitrate = int(abr)
 
+                # Ưu tiên AAC
+                is_aac = 'aac' in acodec.lower() if acodec else False
+                codec_score = 100 if is_aac else 0
+
                 # Phân loại bitrate
                 if bitrate >= 160:
                     key = 'high'
-                    label = "Trung bình ⚡"
+                    label = "Cao ⚡"
                 elif bitrate >= 100:
                     key = 'medium'
                     label = "Trung bình"
@@ -127,19 +128,23 @@ def display_formats(info):
                     key = 'low'
                     label = "Thấp"
 
-                # Giữ audio có bitrate cao nhất trong mỗi nhóm
-                if key not in audio_formats or bitrate > audio_formats[key].get('abr', 0):
+                # Giữ audio có bitrate cao nhất + ưu tiên AAC trong mỗi nhóm
+                quality_score = bitrate + codec_score
+                if key not in audio_formats or quality_score > audio_formats[key].get('score', 0):
+                    codec_label = " (AAC)" if is_aac else ""
                     audio_formats[key] = {
                         'format_id': format_id,
-                        'label': label,
+                        'label': label + codec_label,
                         'bitrate': f"{bitrate}kbps",
-                        'ext': 'mp3',
-                        'abr': bitrate
+                        'ext': 'm4a',
+                        'abr': bitrate,
+                        'score': quality_score,
+                        'codec': acodec
                     }
 
     # Chuyển sang list và sắp xếp
     video_list = sorted(video_formats.values(), key=lambda x: x['height'], reverse=True)
-    audio_list = sorted(audio_formats.values(), key=lambda x: x['abr'], reverse=True)
+    audio_list = sorted(audio_formats.values(), key=lambda x: x['score'], reverse=True)
 
     # Giới hạn audio (lấy 2 mức tốt nhất)
     audio_list = audio_list[:2]
@@ -150,7 +155,7 @@ def display_formats(info):
 def print_menu(video_formats, audio_formats, title):
     """In menu lựa chọn"""
     print("\n" + "="*70)
-    print(f"📺 YOUTUBE DOWNLOADER")
+    print(f"📺 YOUTUBE DOWNLOADER - FASTER WHISPER EDITION")
     print("="*70)
 
     # Rút gọn title
@@ -159,16 +164,15 @@ def print_menu(video_formats, audio_formats, title):
     print("="*70)
 
     if video_formats:
-        print("\n🎬 VIDEO")
+        print("\n🎬 VIDEO (không tiếng - video only)")
         for i, fmt in enumerate(video_formats, 1):
-            audio_note = " (có audio)" if fmt['has_audio'] else ""
-            print(f"  {i}. {fmt['label']:<20} {fmt['resolution']:<10} .{fmt['ext']}{audio_note}")
+            print(f"  {i}. {fmt['label']:<20} {fmt['resolution']:<10} .{fmt['ext']}")
 
     if audio_formats:
-        print("\n🎵 AUDIO")
+        print("\n🎵 AUDIO (cho faster_whisper)")
         audio_start = len(video_formats) + 1
         for i, fmt in enumerate(audio_formats, audio_start):
-            print(f"  {i}. {fmt['label']:<20} {fmt['bitrate']:<10} .{fmt['ext']}")
+            print(f"  {i}. {fmt['label']:<30} {fmt['bitrate']:<10} .{fmt['ext']}")
 
     print("\n  0. Thoát")
     print("="*70)
@@ -178,11 +182,11 @@ def get_safe_filename(output_path, base_name, extension):
     """Tạo tên file an toàn, không ghi đè file cũ"""
     filename = f"{base_name}.{extension}"
     filepath = Path(output_path) / filename
-
+    
     # Nếu file không tồn tại, trả về tên gốc
     if not filepath.exists():
         return filename
-
+    
     # Nếu file đã tồn tại, tăng số thứ tự
     counter = 1
     while True:
@@ -193,38 +197,130 @@ def get_safe_filename(output_path, base_name, extension):
         counter += 1
 
 
-def download_media(url, format_id, is_audio=False, output_path="downloads"):
-    """Tải xuống media"""
+def get_best_audio_format(info):
+    """Tự động lấy format audio tốt nhất (AAC ưu tiên)"""
+    formats = info.get('formats', [])
+    best_audio = None
+    best_score = 0
+    
+    for f in formats:
+        vcodec = f.get('vcodec', 'none')
+        acodec = f.get('acodec', 'none')
+        abr = f.get('abr', 0)
+        ext = f.get('ext', '')
+        
+        # Chỉ lấy audio-only
+        if acodec != 'none' and vcodec == 'none' and ext in ['m4a', 'webm', 'mp4']:
+            if abr:
+                bitrate = int(abr)
+                is_aac = 'aac' in acodec.lower() if acodec else False
+                
+                # Điểm ưu tiên: AAC + bitrate cao
+                score = bitrate + (100 if is_aac else 0)
+                
+                if score > best_score:
+                    best_score = score
+                    best_audio = f.get('format_id')
+    
+    return best_audio
+
+
+def download_video_and_audio(url, video_format_id, output_path="downloads"):
+    """
+    Tải video không tiếng + audio tốt nhất
+    Kết quả: video_cn.mp4 + video_cn.m4a
+    """
     Path(output_path).mkdir(exist_ok=True)
 
-    # Xác định extension và tên file
-    extension = 'mp3' if is_audio else 'mp4'
-    safe_filename = get_safe_filename(output_path, 'video_cn', extension)
+    # Lấy thông tin để tìm audio tốt nhất
+    print("\n🔍 Đang tìm audio tốt nhất...")
+    info = get_video_info(url)
+    if not info:
+        return
+    
+    best_audio_id = get_best_audio_format(info)
+    if not best_audio_id:
+        print("⚠️  Không tìm thấy audio, chỉ tải video")
+        download_video_only(url, video_format_id, output_path)
+        return
+    
+    # Tạo tên file an toàn
+    base_name = 'video_cn'
+    safe_video_filename = get_safe_filename(output_path, base_name, 'mp4')
+    safe_audio_filename = get_safe_filename(output_path, base_name, 'm4a')
+    
+    # Tách số thứ tự (nếu có) để đồng bộ tên file
+    if '_' in safe_video_filename:
+        base_num = safe_video_filename.split('.')[0]  # video_cn_1
+        safe_audio_filename = f"{base_num}.m4a"
+    
+    print(f"💾 Video file: {safe_video_filename}")
+    print(f"💾 Audio file: {safe_audio_filename}")
+    
+    # Tải VIDEO (không tiếng)
+    print(f"\n📥 [1/2] Đang tải video (không tiếng)...")
+    video_template = f'{output_path}/{safe_video_filename}'
+    
+    ydl_opts_video = {
+        'format': video_format_id,
+        'outtmpl': video_template,
+        'progress_hooks': [progress_hook],
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts_video) as ydl:
+            ydl.download([url])
+        print(f"\n✅ Video đã tải xong!")
+    except Exception as e:
+        print(f"\n❌ Lỗi khi tải video: {e}")
+        return
+    
+    # Tải AUDIO (giữ nguyên AAC/M4A, không convert)
+    print(f"\n📥 [2/2] Đang tải audio chất lượng cao (AAC)...")
+    audio_template = f'{output_path}/{safe_audio_filename}'
+    
+    ydl_opts_audio = {
+        'format': best_audio_id,
+        'outtmpl': audio_template,
+        'progress_hooks': [progress_hook],
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts_audio) as ydl:
+            ydl.download([url])
+        print(f"\n✅ Audio đã tải xong!")
+        
+        print("\n" + "="*70)
+        print("🎉 HOÀN THÀNH!")
+        print("="*70)
+        print(f"📁 Vị trí: {os.path.abspath(output_path)}")
+        print(f"  📹 Video: {safe_video_filename}")
+        print(f"  🎵 Audio: {safe_audio_filename}")
+        print("\n💡 Bước tiếp theo:")
+        print("  1. Dùng faster_whisper với file M4A để tạo SRT")
+        print("  2. Dịch SRT sang tiếng Việt")
+        print("  3. TTS tiếng Việt")
+        print("  4. Ghép: video.mp4 + voice_vi.wav + audio_gốc (nhạc nền)")
+        print("="*70)
+        
+    except Exception as e:
+        print(f"\n❌ Lỗi khi tải audio: {e}")
+
+
+def download_video_only(url, format_id, output_path="downloads"):
+    """Tải chỉ video (fallback)"""
+    Path(output_path).mkdir(exist_ok=True)
+    safe_filename = get_safe_filename(output_path, 'video_cn', 'mp4')
     output_template = f'{output_path}/{safe_filename}'
-
+    
     print(f"\n💾 Tên file: {safe_filename}")
-
-    if is_audio:
-        # Tải audio và convert sang MP3
-        ydl_opts = {
-            'format': format_id,
-            'outtmpl': output_template,
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-            'progress_hooks': [progress_hook],
-        }
-    else:
-        # Tải video, tự động merge với audio tốt nhất
-        ydl_opts = {
-            'format': f'{format_id}+bestaudio/best',
-            'outtmpl': output_template,
-            'merge_output_format': 'mp4',
-            'progress_hooks': [progress_hook],
-        }
-
+    
+    ydl_opts = {
+        'format': format_id,
+        'outtmpl': output_template,
+        'progress_hooks': [progress_hook],
+    }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             print("\n⬇️  Đang tải xuống...")
@@ -233,7 +329,30 @@ def download_media(url, format_id, is_audio=False, output_path="downloads"):
             print(f"📁 Lưu tại: {os.path.abspath(output_path)}/{safe_filename}")
     except Exception as e:
         print(f"\n❌ Lỗi khi tải: {e}")
-        print("💡 Gợi ý: Kiểm tra kết nối mạng hoặc thử video khác")
+
+
+def download_audio_only(url, format_id, output_path="downloads"):
+    """Tải chỉ audio (giữ nguyên AAC/M4A)"""
+    Path(output_path).mkdir(exist_ok=True)
+    safe_filename = get_safe_filename(output_path, 'video_cn', 'm4a')
+    output_template = f'{output_path}/{safe_filename}'
+    
+    print(f"\n💾 Tên file: {safe_filename}")
+    
+    ydl_opts = {
+        'format': format_id,
+        'outtmpl': output_template,
+        'progress_hooks': [progress_hook],
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print("\n⬇️  Đang tải xuống audio AAC...")
+            ydl.download([url])
+            print("\n✅ Tải xuống hoàn tất!")
+            print(f"📁 Lưu tại: {os.path.abspath(output_path)}/{safe_filename}")
+    except Exception as e:
+        print(f"\n❌ Lỗi khi tải: {e}")
 
 
 def progress_hook(d):
@@ -318,21 +437,19 @@ def process_video(url):
             choice = int(choice_str)
 
             if 1 <= choice <= len(video_formats):
-                # Tải video
+                # Tải video + audio tốt nhất
                 selected = video_formats[choice - 1]
                 print(f"\n📌 Đã chọn: {selected['label']} {selected['resolution']}")
-
-                if not selected['has_audio']:
-                    print("💡 Video này sẽ được merge với audio tốt nhất")
-
-                download_media(url, selected['format_id'], is_audio=False)
+                print("💡 Sẽ tải video (không tiếng) + audio tốt nhất (AAC/M4A)")
+                
+                download_video_and_audio(url, selected['format_id'])
 
             elif len(video_formats) < choice <= total_options:
-                # Tải audio
+                # Tải chỉ audio
                 audio_index = choice - len(video_formats) - 1
                 selected = audio_formats[audio_index]
                 print(f"\n📌 Đã chọn: Audio {selected['bitrate']}")
-                download_media(url, selected['format_id'], is_audio=True)
+                download_audio_only(url, selected['format_id'])
 
             else:
                 print("❌ Lựa chọn không hợp lệ!")
@@ -341,7 +458,7 @@ def process_video(url):
             # Hỏi có muốn tải thêm định dạng khác không
             print("\n" + "-"*70)
             next_action = input("💾 Bạn muốn: [1] Tải định dạng khác, [2] Chuyển video mới, [0] Thoát: ").strip()
-
+            
             if next_action == '0':
                 print("\n👋 Tạm biệt!")
                 return False
@@ -361,9 +478,14 @@ def process_video(url):
 def main():
     """Hàm chính"""
     print("\n" + "="*70)
-    print("🎬 YOUTUBE DOWNLOADER")
-    print("Tải video chất lượng cao: Full HD (1080p), HD (720p), 4K")
-    print("Tải audio MP3: 128kbps - 192kbps")
+    print("🎬 YOUTUBE DOWNLOADER - FASTER WHISPER EDITION")
+    print("="*70)
+    print("✨ Tính năng đặc biệt:")
+    print("  • Tải video KHÔNG TIẾNG (video-only MP4)")
+    print("  • Tải audio CHẤT LƯỢNG CAO (AAC/M4A, ưu tiên AAC)")
+    print("  • Tự động tăng số tên file (video_cn_1, video_cn_2...)")
+    print("  • Hoàn hảo cho faster_whisper -> dịch -> TTS -> lồng tiếng")
+    print("  • Tiết kiệm dung lượng: M4A chỉ ~10% so với WAV")
     print("="*70)
 
     # Vòng lặp chính cho nhiều video
@@ -381,7 +503,7 @@ def main():
 
         # Xử lý video
         continue_program = process_video(url)
-
+        
         if not continue_program:
             break  # Kết thúc chương trình
 
