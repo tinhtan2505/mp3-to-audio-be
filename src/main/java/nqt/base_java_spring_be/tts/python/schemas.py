@@ -28,3 +28,8 @@ class MixRequest(BaseModel):
     logo_h: int = 40
     branding_text: str = "NQT DRAMA REVIEW"
     branding_image_path: Optional[str] = "D:/Dubbing/logo.png"
+    subtitle_path: Optional[str] = None          # Đường dẫn file .srt vietsub
+    subtitle_font_size: int = 28                 # Cỡ chữ subtitle
+    subtitle_font_color: str = "white"           # Màu chữ
+    subtitle_border_color: str = "black"         # Màu viền chữ
+    subtitle_border_width: int = 2               # Độ dày viền

@@ -3,17 +3,74 @@ import re
 import time
 import random
 import subprocess
-import tempfile
 from pathlib import Path
-from collections import defaultdict
 from fastapi import APIRouter, HTTPException
 from schemas import MixRequest
 from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
-router = APIRouter()
+def _srt_to_ass(srt_path: str, ass_path: str, video_w: int, video_h: int,
+                font_size: int, outline: int, margin_v: int):
+    """
+    Convert file SRT → ASS với style tùy chỉnh vị trí và font.
+    Dùng pure Python, không cần thư viện ngoài.
+    Alignment=2 (bottom-center), MarginV tính từ dưới lên.
+    """
+    def _srt_time_to_ass(ts: str) -> str:
+        # SRT: 00:00:01,234  →  ASS: 0:00:01.23
+        ts = ts.strip().replace(",", ".")
+        h, m, rest = ts.split(":", 2)
+        s, ms = rest.split(".")
+        ms = ms[:2]  # ASS chỉ dùng 2 chữ số centiseconds
+        return f"{int(h)}:{m}:{s}.{ms}"
 
-# ==================== HELPER FUNCTIONS ====================
+    ass_header = f"""\ufeff[Script Info]
+ScriptType: v4.00+
+PlayResX: {video_w}
+PlayResY: {video_h}
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{outline},0,2,0,0,{margin_v},1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    # Parse SRT
+    with open(srt_path, "r", encoding="utf-8-sig") as f:
+        content = f.read()
+
+    # Tách các block subtitle
+    blocks = re.split(r"\n\s*\n", content.strip())
+    events = []
+    for block in blocks:
+        lines = block.strip().splitlines()
+        if len(lines) < 3:
+            continue
+        # Dòng 0: số thứ tự, dòng 1: timecode, dòng 2+: text
+        timecode_line = lines[1]
+        if "-->" not in timecode_line:
+            continue
+        start_raw, end_raw = timecode_line.split("-->")
+        start_ass = _srt_time_to_ass(start_raw)
+        end_ass   = _srt_time_to_ass(end_raw)
+        # Ghép text, nhiều dòng dùng \N trong ASS
+        text = r"\N".join(lines[2:])
+        # Escape { } để không bị hiểu là ASS override tag
+        text = text.replace("{", r"\{").replace("}", r"\}")
+        events.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}")
+
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(ass_header)
+        f.write("\n".join(events))
+        f.write("\n")
+
+    print(f"   📄 ASS: {len(events)} dòng | PlayRes={video_w}x{video_h} | MarginV={margin_v}")
+
+
+router = APIRouter()
 
 def get_video_duration(video_path):
     """Lấy thời lượng video bằng ffprobe"""
@@ -28,26 +85,20 @@ def get_video_duration(video_path):
         print(f"   ⚠️  Không lấy được thời lượng video: {e}")
         return None
 
-
-def get_video_info(video_path):
-    """Lấy thông tin video đầy đủ (width, height, duration)"""
+def get_video_dimensions(video_path):
+    """Lấy chiều rộng và chiều cao video bằng ffprobe"""
     try:
-        result = subprocess.run([
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,duration",
-            "-of", "csv=p=0", video_path
-        ], capture_output=True, text=True, check=True)
-
-        parts = result.stdout.strip().split(',')
-        width, height = int(parts[0]), int(parts[1])
-        duration = float(parts[2]) if len(parts) > 2 else get_video_duration(video_path)
-
-        return width, height, duration
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height",
+             "-of", "csv=s=x:p=0", video_path],
+            capture_output=True, text=True, check=True
+        )
+        w, h = result.stdout.strip().split("x")
+        return int(w), int(h)
     except Exception as e:
-        print(f"   ⚠️  Lỗi get_video_info: {e}")
-        return None, None, None
-
+        print(f"   ⚠️  Không lấy được kích thước video: {e}")
+        return None, None
 
 def parse_ffmpeg_progress(line, total_duration):
     """Parse output của FFmpeg để lấy tiến độ"""
@@ -59,13 +110,25 @@ def parse_ffmpeg_progress(line, total_duration):
         return current_time, min(progress, 100)
     return None, None
 
+def escape_srt_path(path: str) -> str:
+    """
+    Escape đường dẫn SRT cho FFmpeg subtitles filter.
+    - Windows: D:/foo/bar.srt  → D\\:/foo/bar.srt
+    - Backslash → forward slash trước, rồi escape colon
+    """
+    path = path.replace("\\", "/")
+    # Escape dấu ':' (ký tự đặc biệt trong FFmpeg filter graph)
+    path = path.replace(":", "\\:")
+    return path
 
-# ==================== API ENDPOINT ====================
-
-@router.post("/api/v1/dubbing/crop-video")
+# --- 5.5. API MIX VIDEO (GHÉP PHIM) ---
+@router.post("/api/v1/dubbing/mix-video")
 def api_mix(req: MixRequest):
     start_time = time.time()
-    Logger.section("GHÉP VIDEO (FFMPEG) - ANTI-COPYRIGHT MODE (CROP)")
+    Logger.section("GHÉP VIDEO (FFMPEG)")
+
+    extracted_audio_temp = None  # Track temporary file for cleanup
+    ass_temp_path = None          # Track temporary ASS subtitle file
 
     try:
         vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
@@ -75,125 +138,157 @@ def api_mix(req: MixRequest):
         if not os.path.exists(voice): raise FileNotFoundError(f"Thiếu Voice: {voice}")
 
         m_vol = req.music_volume if req.music_volume is not None else DEFAULT_MUSIC_VOLUME
-        has_music = (m_vol > 0) and os.path.exists(inst)
+
+        # Xử lý trường hợp nhạc nền là video gốc
+        if inst and os.path.normpath(inst) == os.path.normpath(vid):
+            print("   🎵 Phát hiện nhạc nền = video gốc, tự động trích xuất audio...")
+            video_dir = os.path.dirname(vid)
+            extracted_audio = os.path.join(video_dir, f"extracted_audio_{get_timestamp_str()}.mp3")
+            extracted_audio_temp = extracted_audio
+
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", vid, "-vn", "-acodec", "libmp3lame",
+                     "-b:a", "192k", extracted_audio],
+                    capture_output=True, text=True, check=True
+                )
+                inst = extracted_audio
+                print(f"   ✅ Đã trích xuất audio: {extracted_audio}")
+            except subprocess.CalledProcessError as e:
+                print(f"   ⚠️  Không trích xuất được audio từ video gốc: {e}")
+                inst = None
+                extracted_audio_temp = None
+
+        has_music = (m_vol > 0) and inst and os.path.exists(inst)
 
         video_dir = os.path.dirname(vid)
         out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
 
-        # Lấy thông tin video
+        # Lấy thời lượng và kích thước video
         print("   📊 Đang phân tích video...")
-        orig_w, orig_h, total_duration = get_video_info(vid)
-
-        if not orig_w or not orig_h:
-            raise Exception("Không thể lấy thông tin kích thước video")
-
+        total_duration = get_video_duration(vid)
         if total_duration:
             print(f"   ⏱️  Thời lượng video: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
-        print(f"   📐 Kích thước gốc: {orig_w}x{orig_h}")
 
-        # ==================== ANTI-COPYRIGHT PARAMETERS ====================
+        video_width, video_height = get_video_dimensions(vid)
+        if video_width and video_height:
+            print(f"   📐 Kích thước video: {video_width}x{video_height}")
 
-        # 1. RANDOM CROP PARAMETERS (Quan trọng nhất!)
-        crop_percent_w = random.uniform(0.88, 0.94)  # Crop 6-12% chiều rộng
-        crop_percent_h = random.uniform(0.88, 0.94)  # Crop 6-12% chiều cao
+        # ============================================================
+        # CHỐNG BẢN QUYỀN - COLOR GRADING (Video)
+        # ============================================================
+        saturation = round(random.uniform(1.15, 1.35), 2)
+        contrast = round(random.uniform(1.08, 1.18), 2)
+        brightness = round(random.uniform(0.02, 0.08), 3)
+        gamma = round(random.uniform(0.95, 1.05), 2)
 
-        # Tính kích thước sau crop
-        crop_w = int(orig_w * crop_percent_w)
-        crop_h = int(orig_h * crop_percent_h)
+        print(f"   🎨 COLOR GRADING:")
+        print(f"      • Saturation: {saturation}x")
+        print(f"      • Contrast: {contrast}x")
+        print(f"      • Brightness: +{brightness}")
+        print(f"      • Gamma: {gamma}")
 
-        # Đảm bảo chẵn
-        crop_w = crop_w if crop_w % 2 == 0 else crop_w - 1
-        crop_h = crop_h if crop_h % 2 == 0 else crop_h - 1
-
-        # Random vị trí crop (không phải luôn center)
-        max_x = orig_w - crop_w
-        max_y = orig_h - crop_h
-        crop_x = random.randint(0, max_x) if max_x > 0 else 0
-        crop_y = random.randint(0, max_y) if max_y > 0 else 0
-
-        # 2. COLOR GRADING PARAMETERS
-        saturation = random.uniform(1.15, 1.35)     # Tăng độ bão hòa 15-35%
-        contrast = random.uniform(1.08, 1.18)       # Tăng độ tương phản 8-18%
-        brightness = random.uniform(0.02, 0.08)     # Tăng độ sáng 2-8%
-        gamma = random.uniform(0.95, 1.05)          # Điều chỉnh gamma
-
-        # 3. AUDIO TRANSFORMATION PARAMETERS (CHỈ CHO NHẠC NỀN)
-        music_pitch = random.uniform(-0.4, 0.4)     # Pitch shift music
-        music_highpass = random.randint(60, 100)    # High-pass filter cho music
-        music_lowpass = random.randint(15000, 18000) # Low-pass filter cho music
-
-        print("   🛡️  ======= CHẾ ĐỘ CHỐNG BẢN QUYỀN (CROP) ======")
-        print(f"   ✂️  Crop: {orig_w}x{orig_h} → {crop_w}x{crop_h} ({crop_percent_w:.1%}x{crop_percent_h:.1%})")
-        print(f"   📍 Crop position: x={crop_x}, y={crop_y}")
-        print(f"   🎨 Color: Sat={saturation:.2f} | Con={contrast:.2f} | Bri=+{brightness:.2f} | Gamma={gamma:.2f}")
-        print(f"   🎵 Audio Transform (CHỈ NHẠC NỀN): Pitch={music_pitch:+.2f}st | HP={music_highpass}Hz | LP={music_lowpass}Hz")
-        print(f"   🎤 Voice: GIỮ NGUYÊN (không transform)")
-
-        # Cấu hình inputs
         inputs = []
         filters = []
 
-        # ==================== PHẦN 1: XỬ LÝ VIDEO ====================
+        # ============================================================
+        # PHẦN 1: XỬ LÝ VIDEO
+        # ============================================================
+        video_chain = f"[0:v]eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
 
-        # FILTER CHAIN:
-        # 1. Crop video
-        video_chain = (
-            f"[0:v]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
-            f"eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
-            f"[v_cropped]"
-        )
-        filters.append(video_chain)
-
-        # ==================== XỬ LÝ LOGO & BRANDING (MANUAL MODE) ====================
         if req.remove_logo:
-            print("   🛡️  Xóa Logo/Text: BẬT (MANUAL MODE với CROP)")
+            print("   🛡️  Xóa Logo: BẬT")
+            video_chain += f",delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}"
 
-            # Lấy giá trị từ request (tọa độ gốc)
-            logo_x_orig = req.logo_x
-            logo_y_orig = req.logo_y
-            logo_w_orig = req.logo_w
-            logo_h_orig = req.logo_h
+            # --------------------------------------------------------
+            # VIETSUB - convert SRT → ASS rồi burn vào video
+            # Dùng file .ass thay vì subtitles filter để tránh lỗi
+            # đường dẫn Windows và đảm bảo vị trí chính xác
+            # --------------------------------------------------------
+            has_subtitle = req.subtitle_path and os.path.exists(req.subtitle_path)
+            ass_temp_path = None  # track để cleanup sau
 
-            print(f"   📍 Logo gốc (trước crop): x={logo_x_orig}, y={logo_y_orig}, w={logo_w_orig}, h={logo_h_orig}")
+            if has_subtitle:
+                print(f"   📝 Vietsub: BẬT - {req.subtitle_path}")
 
-            # Điều chỉnh tọa độ logo theo crop offset
-            logo_x_cropped = logo_x_orig - crop_x
-            logo_y_cropped = logo_y_orig - crop_y
+                font_size  = req.subtitle_font_size
+                logo_y_val = req.logo_y
+                logo_h_val = req.logo_h
+                vw = video_width  or 720
+                vh = video_height or 1280
 
-            print(f"   📍 Logo sau crop: x={logo_x_cropped}, y={logo_y_cropped}, w={logo_w_orig}, h={logo_h_orig}")
+                # Alignment=2 (bottom-center): MarginV tính từ DƯỚI lên
+                margin_v = (vh - logo_y_val - logo_h_val) + max(0, (logo_h_val - font_size) // 2)
+                margin_v = max(0, margin_v)
 
-            # Validate để đảm bảo logo vẫn trong khung hình sau crop
-            if logo_x_cropped < 0:
-                logo_w_orig += logo_x_cropped  # Giảm width nếu bị crop bên trái
-                logo_x_cropped = 0
-            if logo_y_cropped < 0:
-                logo_h_orig += logo_y_cropped  # Giảm height nếu bị crop bên trên
-                logo_y_cropped = 0
-            if logo_y_cropped + logo_h_orig > crop_h:
-                logo_h_orig = crop_h - logo_y_cropped
-            if logo_x_cropped + logo_w_orig > crop_w:
-                logo_w_orig = crop_w - logo_x_cropped
+                print(f"   📐 {vw}x{vh} | logo_y={logo_y_val} logo_h={logo_h_val} font={font_size}")
+                print(f"   📐 MarginV = ({vh}-{logo_y_val}-{logo_h_val}) + ({logo_h_val}-{font_size})//2 = {margin_v}")
 
-            # Chỉ áp dụng delogo nếu logo vẫn nằm trong vùng crop
-            if logo_w_orig > 0 and logo_h_orig > 0 and logo_x_cropped >= 0 and logo_y_cropped >= 0:
-                # Áp dụng delogo
-                delogo_chain = (
-                    f"[v_cropped]delogo=x={logo_x_cropped}:y={logo_y_cropped}:"
-                    f"w={logo_w_orig}:h={logo_h_orig}[v_after_delogo]"
-                )
-                filters.append(delogo_chain)
-                last_video_label = "v_after_delogo"
-                print(f"   ✅ Đã áp dụng delogo tại vùng crop-adjusted")
+                # ── Tạo file .ass tạm với style đúng ──────────────────
+                ass_temp_path = req.subtitle_path.replace(".srt", "_temp_burn.ass")
+                try:
+                    _srt_to_ass(
+                        srt_path=req.subtitle_path,
+                        ass_path=ass_temp_path,
+                        video_w=vw,
+                        video_h=vh,
+                        font_size=font_size,
+                        outline=req.subtitle_border_width,
+                        margin_v=margin_v,
+                    )
+                    print(f"   ✅ Đã tạo ASS: {ass_temp_path}")
+                except Exception as e:
+                    print(f"   ❌ Lỗi tạo ASS: {e}")
+                    ass_temp_path = None
+
+                if ass_temp_path and os.path.exists(ass_temp_path):
+                    # ass filter dùng đường dẫn forward-slash, escape colon
+                    ass_escaped = escape_srt_path(ass_temp_path)
+                    video_chain += f",ass='{ass_escaped}'"
+                    print(f"   🎬 Đã thêm ASS filter vào chain")
+                else:
+                    print(f"   ⚠️  Bỏ qua subtitle do lỗi tạo ASS")
             else:
-                print(f"   ⚠️  Logo nằm ngoài vùng crop, bỏ qua delogo")
-                last_video_label = "v_cropped"
+                if req.subtitle_path:
+                    print(f"   ⚠️  File SRT không tồn tại: {req.subtitle_path}")
+                else:
+                    print(f"   📝 Vietsub: TẮT")
 
-            # XỬ LÝ BRANDING IMAGE
+            # Watermark text bounce
+            if req.branding_text:
+                print(f"   💧 Watermark Text: '{req.branding_text}'")
+
+                font_size_wm = 28
+                alpha = round(random.uniform(0.25, 0.35), 2)
+
+                speed_x = random.randint(48, 50)
+                speed_y = random.randint(48, 50)
+                direction_x = random.choice([1, -1])
+                direction_y = random.choice([1, -1])
+
+                start_x = random.randint(0, 480)
+                start_y = random.randint(0, 480)
+
+                print(f"   📐 Font: {font_size_wm}px | Alpha: {alpha} | Speed: ({speed_x},{speed_y})px/s")
+                print(f"   🎯 Start: ({start_x},{start_y}) | Direction: ({direction_x},{direction_y})")
+
+                escaped_text = req.branding_text.replace(':', '\\:').replace("'", "\\'")
+
+                margin = 10
+                range_x = f"w-tw-{margin*2}"
+                move_x = f"abs(mod({start_x}+{speed_x}*{direction_x}*t\\,2*({range_x}))-({range_x}))+{margin}"
+                range_y = f"h-th-{margin*2}"
+                move_y = f"abs(mod({start_y}+{speed_y}*{direction_y}*t\\,2*({range_y}))-({range_y}))+{margin}"
+
+                video_chain += f",drawtext=text='{escaped_text}':fontsize={font_size_wm}:fontcolor=white@{alpha}:x='{move_x}':y='{move_y}':shadowcolor=black@0.3:shadowx=2:shadowy=2"
+
             brand_img_path = req.branding_image_path
             has_branding = brand_img_path and os.path.exists(brand_img_path)
 
             if has_branding:
                 print("   ✅ Chèn Ảnh Thương hiệu: BẬT")
+                video_chain += "[v_delogo]"
+                filters.append(video_chain)
 
                 inputs = ["-i", vid]
                 if has_music:
@@ -204,15 +299,12 @@ def api_mix(req: MixRequest):
                     brand_idx = 2
 
                 filters.append(f"[{brand_idx}:v]scale=80:80[v_brand]")
-                filters.append(f"[{last_video_label}][v_brand]overlay=x=10:y=10[v_out]")
+                filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
                 video_map = "[v_out]"
             else:
                 print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")
-                # Đổi tên label cuối cùng thành v_out
-                if last_video_label != "v_cropped":
-                    filters[-1] = filters[-1].replace(f"[{last_video_label}]", "[v_out]")
-                else:
-                    filters[-1] = filters[-1].replace("[v_cropped]", "[v_out]")
+                video_chain += "[v_out]"
+                filters.append(video_chain)
                 video_map = "[v_out]"
 
                 inputs = ["-i", vid]
@@ -221,9 +313,8 @@ def api_mix(req: MixRequest):
                 else:
                     inputs.extend(["-i", voice])
         else:
-            # KHÔNG XÓA LOGO
-            print("   ⚠️  Xóa Logo/Text: TẮT")
-            filters[-1] = filters[-1].replace("[v_cropped]", "[v_out]")
+            video_chain += "[v_out]"
+            filters.append(video_chain)
             video_map = "[v_out]"
 
             inputs = ["-i", vid]
@@ -232,54 +323,47 @@ def api_mix(req: MixRequest):
             else:
                 inputs.extend(["-i", voice])
 
-        # ==================== PHẦN 2: XỬ LÝ AUDIO ====================
+        # ============================================================
+        # PHẦN 2: XỬ LÝ AUDIO
+        # ============================================================
         if has_music:
-            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền) + Audio Transform")
+            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền)")
             duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
-            voice_idx = 2 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 2
-            music_idx = 1 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 1
+            voice_idx = 2
+            music_idx = 1
 
-            # VOICE PROCESSING: GIỮ NGUYÊN - Chỉ Volume + EQ cơ bản
-            voice_filter = (
-                f"[{voice_idx}:a]"
-                f"volume={req.voice_volume or 3.0},"
-                f"lowshelf=g=5:f=100:w=0.5"
-                f"[voice]"
-            )
-            filters.append(voice_filter)
+            filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[voice]")
             filters.append(f"[voice]asplit[v_trig][v_mix]")
 
-            # MUSIC PROCESSING: TRANSFORM ĐỂ TRÁNH BẢN QUYỀN
-            music_filter = (
-                f"[{music_idx}:a]"
-                f"volume={m_vol},"
-                f"highpass=f={music_highpass},"
-                f"lowpass=f={music_lowpass},"
-                f"asetrate=44100*2^({music_pitch}/12),aresample=44100,"
-                f"equalizer=f=1000:t=h:w=200:g=-2"
-                f"[bg]"
-            )
-            filters.append(music_filter)
+            music_pitch = round(random.uniform(-0.4, 0.4), 2)
+            music_highpass = random.randint(60, 100)
+            music_lowpass = random.randint(15000, 18000)
 
-            # DUCKING & MIXING
+            print(f"   🎵 AUDIO TRANSFORMATION (Music Only):")
+            print(f"      • Pitch Shift: {music_pitch:+.2f} semitones")
+            print(f"      • High-pass Filter: {music_highpass}Hz")
+            print(f"      • Low-pass Filter: {music_lowpass}Hz")
+
+            music_filter = f"[{music_idx}:a]"
+
+            if music_pitch != 0:
+                rate_factor = round(2 ** (music_pitch / 12), 4)
+                music_filter += f"asetrate=44100*{rate_factor},atempo={1/rate_factor},"
+
+            music_filter += f"highpass=f={music_highpass},"
+            music_filter += f"lowpass=f={music_lowpass},"
+            music_filter += f"volume={m_vol}[bg]"
+
+            filters.append(music_filter)
             filters.append(f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck]")
             filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
         else:
             print(f"   🎚️  Chế độ: VOICE ONLY (Chỉ giọng đọc)")
-            voice_idx = 1 if not (req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path)) else 1
-
-            # VOICE PROCESSING: GIỮ NGUYÊN
-            voice_filter = (
-                f"[{voice_idx}:a]"
-                f"volume={req.voice_volume or 3.0},"
-                f"lowshelf=g=5:f=100:w=0.5"
-                f"[a_out]"
-            )
-            filters.append(voice_filter)
+            voice_idx = 1
+            filters.append(f"[{voice_idx}:a]volume={req.voice_volume or 3.0},lowshelf=g=5:f=100:w=0.5[a_out]")
 
         filter_complex = ";".join(filters)
 
-        # Tạo lệnh FFmpeg
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1"] + inputs + [
             "-filter_complex", filter_complex,
             "-map", video_map, "-map", "[a_out]",
@@ -289,9 +373,13 @@ def api_mix(req: MixRequest):
         ]
 
         print("   ⏳ Đang render FFmpeg...")
-        print(f"   🔧 Filter (rút gọn): ...{filter_complex[-100:]}")
+        print(f"   🔧 Filter: {filter_complex}")
 
-        # Chạy FFmpeg với real-time progress tracking
+        print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
+        print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
+        if has_music:
+            print(f"   🎵 Music: {inst} ({os.path.getsize(inst)} bytes)")
+
         print("\n" + "="*60)
         render_start = time.time()
         last_progress_update = 0
@@ -345,6 +433,20 @@ def api_mix(req: MixRequest):
         total_time = time.time() - start_time
         render_time = time.time() - render_start
 
+        if extracted_audio_temp and os.path.exists(extracted_audio_temp):
+            try:
+                os.remove(extracted_audio_temp)
+                print(f"   🗑️  Đã xóa file audio tạm: {extracted_audio_temp}")
+            except Exception as e:
+                print(f"   ⚠️  Không xóa được file tạm: {e}")
+
+        if ass_temp_path and os.path.exists(ass_temp_path):
+            try:
+                os.remove(ass_temp_path)
+                print(f"   🗑️  Đã xóa file ASS tạm: {ass_temp_path}")
+            except Exception as e:
+                print(f"   ⚠️  Không xóa được ASS tạm: {e}")
+
         Logger.success("XỬ LÝ THÀNH CÔNG!", total_time)
         print(f"   ⏱️  Thời gian render: {render_time:.2f}s")
         print(f"   ⏱️  Tổng thời gian: {total_time:.2f}s")
@@ -354,30 +456,17 @@ def api_mix(req: MixRequest):
         return {
             "status": "success",
             "output_file": out_file,
-            "anti_copyright_applied": {
-                "crop_info": {
-                    "original": f"{orig_w}x{orig_h}",
-                    "cropped": f"{crop_w}x{crop_h}",
-                    "position": f"x={crop_x}, y={crop_y}",
-                    "crop_percent": f"{crop_percent_w:.1%}x{crop_percent_h:.1%}"
-                },
-                "color_grading": {
-                    "saturation": f"{saturation:.2f}",
-                    "contrast": f"{contrast:.2f}",
-                    "brightness": f"+{brightness:.2f}",
-                    "gamma": f"{gamma:.2f}"
-                },
-                "audio_transform": {
-                    "voice": "UNCHANGED (giữ nguyên)",
-                    "music_pitch": f"{music_pitch:+.2f}st",
-                    "music_filters": f"HP:{music_highpass}Hz, LP:{music_lowpass}Hz"
-                }
+            "color_grading": {
+                "saturation": saturation,
+                "contrast": contrast,
+                "brightness": brightness,
+                "gamma": gamma
             },
-            "logo_removal": {
-                "enabled": req.remove_logo,
-                "original_coords": f"x={req.logo_x}, y={req.logo_y}, w={req.logo_w}, h={req.logo_h}" if req.remove_logo else None,
-                "cropped_coords": f"x={logo_x_cropped if req.remove_logo else 'N/A'}, y={logo_y_cropped if req.remove_logo else 'N/A'}" if req.remove_logo else None
-            },
+            "audio_transform": {
+                "music_pitch": music_pitch if has_music else None,
+                "music_highpass": music_highpass if has_music else None,
+                "music_lowpass": music_lowpass if has_music else None
+            } if has_music else None,
             "render_time": f"{render_time:.2f}s",
             "total_time": f"{total_time:.2f}s",
             "file_size_mb": f"{os.path.getsize(out_file) / 1024 / 1024:.2f}"
@@ -386,7 +475,25 @@ def api_mix(req: MixRequest):
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr if isinstance(e.stderr, str) else str(e)
         print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-10:]))
+
+        if extracted_audio_temp and os.path.exists(extracted_audio_temp):
+            try: os.remove(extracted_audio_temp)
+            except: pass
+
+        if ass_temp_path and os.path.exists(ass_temp_path):
+            try: os.remove(ass_temp_path)
+            except: pass
+
         raise HTTPException(500, "Lỗi khi chạy FFmpeg")
     except Exception as e:
         Logger.error("Lỗi hệ thống", e)
+
+        if extracted_audio_temp and os.path.exists(extracted_audio_temp):
+            try: os.remove(extracted_audio_temp)
+            except: pass
+
+        if ass_temp_path and os.path.exists(ass_temp_path):
+            try: os.remove(ass_temp_path)
+            except: pass
+
         raise HTTPException(500, str(e))

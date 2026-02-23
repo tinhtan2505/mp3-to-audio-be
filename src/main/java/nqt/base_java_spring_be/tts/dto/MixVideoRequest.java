@@ -18,4 +18,7 @@ public class MixVideoRequest {
     private Integer logoW;
     private Integer logoH;
     private boolean crop = false;
+    private String subtitlePath;
+    private Integer subtitleFontSize;
+    private Integer subtitleBorderWidth;
 }
