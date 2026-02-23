@@ -3,7 +3,6 @@ import os
 import time
 import re
 import torch
-import whisper
 from faster_whisper import WhisperModel
 from google import genai
 from google.genai.types import GenerateContentConfig, GoogleSearch
@@ -63,7 +62,7 @@ def load_ai_models():
             )
             Logger.success(f"Faster-Whisper đã tải xong", time.time() - start)
         else:
-            AI_MODELS["whisper"] = whisper.load_model(WHISPER_MODEL_SIZE, device=AI_MODELS["device"])
+            # AI_MODELS["whisper"] = whisper.load_model(WHISPER_MODEL_SIZE, device=AI_MODELS["device"])
             Logger.success(f"OpenAI-Whisper đã tải xong", time.time() - start)
     except Exception as e:
         Logger.error("Lỗi tải Whisper", e)

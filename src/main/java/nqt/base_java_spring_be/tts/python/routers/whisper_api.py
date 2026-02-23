@@ -732,7 +732,7 @@ def tts_file_background(vi_srt_path, tts_files_list, lock):
         print(f"   ❌ [Background TTS] Lỗi: {e}\n")
 
 
-def translate_file_background(file_path, translated_files_list, lock, tts_files_list, tts_lock):
+def translate_file_background(file_path, translated_files_list, lock, tts_files_list, tts_lock, tts_threads_list, tts_threads_lock):
     """
     Hàm chạy trong thread riêng để dịch file mà không block Whisper
     SAU KHI DỊCH THÀNH CÔNG -> TỰ ĐỘNG GỌI TTS VỚI XỬ LÝ THỜI GIAN
@@ -750,10 +750,12 @@ def translate_file_background(file_path, translated_files_list, lock, tts_files_
             tts_thread = threading.Thread(
                 target=tts_file_background,
                 args=(translated_file, tts_files_list, tts_lock),
-                daemon=True
+                daemon=False
             )
             tts_thread.start()
             # ============================================================
+            with tts_threads_lock:
+                tts_threads_list.append(tts_thread)
 
         else:
             print(f"   ⚠️  [Background] Dịch thất bại: {os.path.basename(file_path)}\n")
@@ -794,6 +796,9 @@ def api_whisper(req: WhisperRequest):
             translation_lock = threading.Lock()
             tts_lock = threading.Lock()
             translation_threads = []
+
+            tts_threads_list = []
+            tts_threads_lock = threading.Lock()
 
             # Tracking variables
             total_segments = 0
@@ -944,7 +949,7 @@ def api_whisper(req: WhisperRequest):
                         if GEMINI_API_KEYS:
                             thread = threading.Thread(
                                 target=translate_file_background,
-                                args=(current_file_path, translated_files_list, translation_lock, tts_files_list, tts_lock),
+                                args=(current_file_path, translated_files_list, translation_lock, tts_files_list, tts_lock, tts_threads_list, tts_threads_lock),
                                 daemon=True
                             )
                             thread.start()
@@ -973,7 +978,7 @@ def api_whisper(req: WhisperRequest):
                     if GEMINI_API_KEYS:
                         thread = threading.Thread(
                             target=translate_file_background,
-                            args=(current_file_path, translated_files_list, translation_lock, tts_files_list, tts_lock),
+                            args=(current_file_path, translated_files_list, translation_lock, tts_files_list, tts_lock, tts_threads_list, tts_threads_lock),
                             daemon=True
                         )
                         thread.start()
@@ -1017,13 +1022,36 @@ def api_whisper(req: WhisperRequest):
 
             # Chờ tất cả translation threads hoàn thành
             print(f"\n{'='*70}")
-            print(f"⏳ Đang chờ các tiến trình dịch và TTS (có xử lý thời gian) hoàn thành...")
+            print(f"⏳ Đang chờ các tiến trình dịch hoàn thành...")
             print(f"{'='*70}\n")
 
             for i, thread in enumerate(translation_threads, 1):
                 thread.join(timeout=600)  # Timeout 10 phút
                 if thread.is_alive():
-                    print(f"   ⚠️  Thread {i} vẫn đang chạy (timeout)")
+                    print(f"   ⚠️  Translation Thread {i} vẫn đang chạy (timeout)")
+
+            # ← THÊM ĐOẠN NÀY: CHỜ TẤT CẢ TTS THREADS
+            print(f"\n{'='*70}")
+            print(f"⏳ Đang chờ các tiến trình TTS hoàn thành...")
+            print(f"{'='*70}")
+            print(f"   🎤 Tổng số TTS threads: {len(tts_threads_list)}\n")
+
+            with tts_threads_lock:
+                tts_threads_snapshot = list(tts_threads_list)
+
+            for i, tts_thread in enumerate(tts_threads_snapshot, 1):
+                print(f"   ⏳ Đang chờ TTS thread {i}/{len(tts_threads_snapshot)}...")
+                tts_thread.join(timeout=1800)  # Timeout 30 phút cho TTS
+                if tts_thread.is_alive():
+                    print(f"   ⚠️  TTS Thread {i} vẫn đang chạy (timeout)")
+                else:
+                    print(f"   ✅ TTS Thread {i} hoàn thành")
+
+            print(f"\n{'='*70}")
+            print(f"✅ TẤT CẢ TTS THREADS ĐÃ HOÀN THÀNH")
+            print(f"{'='*70}")
+            print(f"   📊 Tổng số file TTS: {len(tts_files_list)}")
+            print(f"{'='*70}\n")
 
             # ========== GHI FILE TỔNG (MERGED FILE) ==========
             merged_file_path = None
@@ -1045,12 +1073,6 @@ def api_whisper(req: WhisperRequest):
                             print(f"   ❌ File lỗi (bỏ qua): {len(error_files)}")
                             for ef in error_files:
                                 print(f"      • {os.path.basename(ef)}")
-
-                        base_name = os.path.basename(success_files[0])
-                        merged_name = re.sub(r'_part\d+_vi\.srt$', '_vi_FULL.srt', base_name)
-                        merged_file_path = os.path.join(out_dir, merged_name)
-
-                        print(f"   📝 File đầu ra: {merged_name}\n")
 
                         all_subs = pysrt.SubRipFile()
 
@@ -1077,6 +1099,20 @@ def api_whisper(req: WhisperRequest):
 
                                 print(f"      └─ Đã thêm {len(current_subs)} câu (index {first_idx}-{last_idx}, tổng: {len(all_subs)})")
 
+                        # Tính toán index cuối và số file TTS
+                        last_index = all_subs[-1].index if all_subs else 0
+                        tts_count = len(tts_files_list)
+
+                        # Tạo tên file mới với format: video_cn_20260208_131335_vi_FULL_2511_2509.srt
+                        base_name = os.path.basename(success_files[0])
+                        # Loại bỏ _partXX_vi.srt
+                        merged_name = re.sub(r'_part\d+_vi\.srt$', f'_vi_FULL_{last_index}_{tts_count}.srt', base_name)
+                        merged_file_path = os.path.join(out_dir, merged_name)
+
+                        print(f"   📝 File đầu ra: {merged_name}")
+                        print(f"   📌 Index cuối: {last_index}")
+                        print(f"   🎤 Số file TTS: {tts_count}\n")
+
                         all_subs.save(merged_file_path, encoding='utf-8')
 
                         print(f"\n   ✅ Hoàn thành ghi file tổng")
@@ -1085,6 +1121,190 @@ def api_whisper(req: WhisperRequest):
                             print(f"   ⚠️  Lưu ý: Đã bỏ qua {len(error_files)} file lỗi")
                         print(f"   💾 Đường dẫn: {merged_file_path}")
                         print(f"{'='*70}\n")
+
+                        # ========== DI CHUYỂN CÁC FILE THÀNH CÔNG VÀO THƯ MỤC DONE ==========
+                        done_dir = os.path.join(out_dir, "Done")
+                        os.makedirs(done_dir, exist_ok=True)
+
+                        print(f"\n{'='*70}")
+                        print(f"📦 DI CHUYỂN FILE VÀO THƯ MỤC DONE")
+                        print(f"{'='*70}")
+                        print(f"   📁 Thư mục: {done_dir}\n")
+
+                        moved_count = 0
+                        for vi_file in success_files:
+                            # Tìm file CN tương ứng (loại bỏ _vi.srt)
+                            cn_file = vi_file.replace('_vi.srt', '.srt')
+
+                            files_to_move = []
+                            if os.path.exists(vi_file):
+                                files_to_move.append(vi_file)
+                            if os.path.exists(cn_file):
+                                files_to_move.append(cn_file)
+
+                            for src_file in files_to_move:
+                                try:
+                                    dest_file = os.path.join(done_dir, os.path.basename(src_file))
+
+                                    # Nếu file đích đã tồn tại, xóa đi
+                                    if os.path.exists(dest_file):
+                                        os.remove(dest_file)
+
+                                    # Di chuyển file
+                                    os.rename(src_file, dest_file)
+                                    moved_count += 1
+                                    print(f"   ✓ {os.path.basename(src_file)}")
+                                except Exception as e:
+                                    print(f"   ⚠️  Không thể di chuyển {os.path.basename(src_file)}: {str(e)}")
+
+                        print(f"\n   ✅ Đã di chuyển {moved_count} file vào Done")
+                        print(f"{'='*70}\n")
+
+                        # ========== XÓA FILE M4A (AUDIO GỐC) ==========
+                        m4a_pattern = os.path.join(out_dir, f"{base_filename}_cn.wav")
+                        if os.path.exists(m4a_pattern):
+                            try:
+                                file_size_mb = os.path.getsize(m4a_pattern) / (1024 * 1024)
+                                os.remove(m4a_pattern)
+                                print(f"\n{'='*70}")
+                                print(f"🗑️  ĐÃ XÓA FILE AUDIO GỐC")
+                                print(f"{'='*70}")
+                                print(f"   📂 File: {os.path.basename(m4a_pattern)}")
+                                print(f"   💾 Kích thước: {file_size_mb:.2f} MB")
+                                print(f"   ✅ Đã giải phóng dung lượng")
+                                print(f"{'='*70}\n")
+                            except Exception as e:
+                                print(f"\n   ⚠️  Không thể xóa file wav: {str(e)}\n")
+                        else:
+                            # Thử tìm file .m4a với pattern khác
+                            import glob
+                            m4a_files = glob.glob(os.path.join(out_dir, "*_cn.wav"))
+                            if m4a_files:
+                                for m4a_file in m4a_files:
+                                    try:
+                                        file_size_mb = os.path.getsize(m4a_file) / (1024 * 1024)
+                                        os.remove(m4a_file)
+                                        print(f"\n{'='*70}")
+                                        print(f"🗑️  ĐÃ XÓA FILE AUDIO GỐC")
+                                        print(f"{'='*70}")
+                                        print(f"   📂 File: {os.path.basename(m4a_file)}")
+                                        print(f"   💾 Kích thước: {file_size_mb:.2f} MB")
+                                        print(f"   ✅ Đã giải phóng dung lượng")
+                                        print(f"{'='*70}\n")
+                                    except Exception as e:
+                                        print(f"\n   ⚠️  Không thể xóa {os.path.basename(m4a_file)}: {str(e)}\n")
+
+                        # ========== NÉN TẤT CẢ FILE VÀO ZIP (KỂ CẢ FILE LỖI) ==========
+                        import zipfile
+                        import glob
+
+                        zip_name = f"{base_filename}_{timestamp_str}_COMPLETE.zip"
+                        zip_path = os.path.join(out_dir, zip_name)
+
+                        print(f"\n{'='*70}")
+                        print(f"📦 BẮT ĐẦU NÉN FILE VÀO ZIP")
+                        print(f"{'='*70}")
+                        print(f"   📂 File ZIP: {zip_name}\n")
+
+                        try:
+                            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zipf:
+                                files_added = 0
+                                total_size = 0
+                                error_files_count = 0
+
+                                # 1. Thêm file FULL (file tổng VI) nếu có
+                                if merged_file_path and os.path.exists(merged_file_path):
+                                    arcname = os.path.basename(merged_file_path)
+                                    zipf.write(merged_file_path, arcname)
+                                    file_size = os.path.getsize(merged_file_path)
+                                    total_size += file_size
+                                    files_added += 1
+                                    print(f"   ✓ {arcname} ({file_size / 1024:.1f} KB)")
+
+                                # 2. Thêm thư mục TTS (tất cả file MP3 và metadata)
+                                tts_dir_path = os.path.join(out_dir, "tts")
+                                if os.path.exists(tts_dir_path):
+                                    print(f"\n   📁 Đang nén thư mục TTS...")
+                                    for root, dirs, files in os.walk(tts_dir_path):
+                                        for file in files:
+                                            file_path = os.path.join(root, file)
+                                            arcname = os.path.relpath(file_path, out_dir)
+                                            zipf.write(file_path, arcname)
+                                            file_size = os.path.getsize(file_path)
+                                            total_size += file_size
+                                            files_added += 1
+
+                                            # Chỉ log mỗi 100 file để tránh spam
+                                            if files_added % 100 == 0:
+                                                print(f"      └─ Đã thêm {files_added} file ({total_size / (1024*1024):.1f} MB)")
+
+                                # 3. Thêm thư mục Done (file CN và VI đã dịch thành công)
+                                if os.path.exists(done_dir):
+                                    print(f"\n   📁 Đang nén thư mục Done...")
+                                    for root, dirs, files in os.walk(done_dir):
+                                        for file in files:
+                                            file_path = os.path.join(root, file)
+                                            arcname = os.path.relpath(file_path, out_dir)
+                                            zipf.write(file_path, arcname)
+                                            file_size = os.path.getsize(file_path)
+                                            total_size += file_size
+                                            files_added += 1
+                                            print(f"   ✓ {arcname} ({file_size / 1024:.1f} KB)")
+
+                                # 4. Thêm TẤT CẢ FILE LỖI (nếu có)
+                                # Tìm tất cả file có chứa [ERROR] hoặc ERROR_LOG
+                                print(f"\n   📁 Đang tìm và nén file lỗi...")
+
+                                # Pattern cho file lỗi
+                                error_patterns = [
+                                    os.path.join(out_dir, "*_[ERROR].srt"),
+                                    os.path.join(out_dir, "*_ERROR_LOG.txt"),
+                                    os.path.join(out_dir, "*_INTERRUPTED.srt"),
+                                    os.path.join(out_dir, "*_ERROR.srt")
+                                ]
+
+                                for pattern in error_patterns:
+                                    error_files = glob.glob(pattern)
+                                    for error_file in error_files:
+                                        if os.path.exists(error_file):
+                                            arcname = os.path.basename(error_file)
+                                            zipf.write(error_file, arcname)
+                                            file_size = os.path.getsize(error_file)
+                                            total_size += file_size
+                                            files_added += 1
+                                            error_files_count += 1
+                                            print(f"   ⚠️  {arcname} ({file_size / 1024:.1f} KB)")
+
+                                # 5. Thêm file CN gốc còn lại (chưa được di chuyển)
+                                print(f"\n   📁 Đang nén file SRT gốc còn lại...")
+                                cn_srt_files = glob.glob(os.path.join(out_dir, f"{base_filename}_cn_{timestamp_str}_part*.srt"))
+                                for cn_file in cn_srt_files:
+                                    if os.path.exists(cn_file):
+                                        arcname = os.path.basename(cn_file)
+                                        zipf.write(cn_file, arcname)
+                                        file_size = os.path.getsize(cn_file)
+                                        total_size += file_size
+                                        files_added += 1
+                                        print(f"   ✓ {arcname} ({file_size / 1024:.1f} KB)")
+
+                            zip_size = os.path.getsize(zip_path)
+                            compression_ratio = (1 - zip_size / total_size) * 100 if total_size > 0 else 0
+
+                            print(f"\n{'='*70}")
+                            print(f"✅ NÉN FILE HOÀN TẤT")
+                            print(f"{'='*70}")
+                            print(f"   📦 File ZIP: {zip_name}")
+                            print(f"   📊 Tổng số file: {files_added:,} file")
+                            if error_files_count > 0:
+                                print(f"   ⚠️  File lỗi: {error_files_count} file")
+                            print(f"   💾 Kích thước gốc: {total_size / (1024*1024):.2f} MB")
+                            print(f"   📦 Kích thước nén: {zip_size / (1024*1024):.2f} MB")
+                            print(f"   📉 Tỷ lệ nén: {compression_ratio:.1f}%")
+                            print(f"   💾 Đường dẫn: {zip_path}")
+                            print(f"{'='*70}\n")
+
+                        except Exception as e:
+                            print(f"\n   ❌ Lỗi khi nén file: {str(e)}\n")
 
                     else:
                         print(f"\n   ⚠️  Không có file thành công để merge (tất cả đều có [ERROR])\n")
