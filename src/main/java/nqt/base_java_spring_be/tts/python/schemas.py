@@ -33,3 +33,4 @@ class MixRequest(BaseModel):
     subtitle_font_color: str = "white"           # Màu chữ
     subtitle_border_color: str = "black"         # Màu viền chữ
     subtitle_border_width: int = 2               # Độ dày viền
+    watermark_lines: bool = False

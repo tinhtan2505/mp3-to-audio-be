@@ -208,6 +208,7 @@ public class DubbingServiceImpl implements DubbingService {
             if (req.getSubtitlePath() != null) body.put("subtitle_path", req.getSubtitlePath());
             if (req.getSubtitleFontSize() != null) body.put("subtitle_font_size", req.getSubtitleFontSize());
             if (req.getSubtitleBorderWidth() != null) body.put("subtitle_border_width", req.getSubtitleBorderWidth());
+            if (req.getWatermarkLines() != null) body.put("watermark_lines", req.getWatermarkLines());
 
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
 

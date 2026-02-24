@@ -9,6 +9,11 @@ from schemas import MixRequest
 from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
+DEFAULT_WATERMARK_TEXT = [
+    'Link trọn bộ You.Tube -> Tiểu sử',
+    'NQT DRAMA REVIEW'
+]
+
 # ============================================================
 # CHỐNG BẢN QUYỀN - MODULE NÂNG CAO (v2.0)
 # Theo checklist: Remake 40%+ | Đổi màu | Đổi nhạc | Xóa logo
@@ -307,6 +312,24 @@ def api_mix(req: MixRequest):
             # ---- VIETSUB: convert SRT → ASS ----
             has_subtitle = req.subtitle_path and os.path.exists(req.subtitle_path)
 
+            # Nếu không tìm thấy subtitle, tự động tìm file SRT có "vi_FULL" trong tên
+            if not has_subtitle:
+                video_dir_sub = os.path.dirname(vid)
+                found_srt = None
+                try:
+                    for f in os.listdir(video_dir_sub):
+                        if "vi_FULL" in f and f.endswith(".srt"):
+                            found_srt = os.path.join(video_dir_sub, f)
+                            break
+                except Exception as _e:
+                    print(f"   ⚠️  Lỗi khi tìm file SRT: {_e}")
+                if found_srt:
+                    print(f"   🔍 Tự động tìm thấy SRT vi_FULL: {found_srt}")
+                    req.subtitle_path = found_srt
+                    has_subtitle = True
+                else:
+                    print(f"   ⚠️  Không tìm thấy file SRT vi_FULL trong: {video_dir_sub}")
+
             if has_subtitle:
                 print(f"   📝 Vietsub: BẬT - {req.subtitle_path}")
 
@@ -348,6 +371,52 @@ def api_mix(req: MixRequest):
                     print(f"   ⚠️  File SRT không tồn tại: {req.subtitle_path}")
                 else:
                     print(f"   📝 Vietsub: TẮT")
+
+            # ---- WATERMARK TEXT (hiển thị ngay dưới vietsub) ----
+            if req.watermark_lines:
+                wm_texts = DEFAULT_WATERMARK_TEXT
+
+                vw = video_width  or 720
+                vh = video_height or 1280
+
+                # Đặt watermark ngay dưới vùng logo + padding 8px
+                BELOW_LOGO_PADDING = 16
+                wm_y = req.logo_y + req.logo_h + BELOW_LOGO_PADDING
+
+                # Font size và line spacing theo chiều cao video
+                if vh <= 1300:
+                    wm_x         = 65
+                    wm_font_size = 30
+                    wm_line_spacing = 50
+                else:
+                    wm_x         = 120
+                    wm_font_size = 42
+                    wm_line_spacing = 65
+
+                print(f"   💧 Watermark Lines: {len(wm_texts)} dòng | pos=({wm_x},{wm_y}) font={wm_font_size}")
+                print(f"      └─ Dưới logo: logo_y={req.logo_y} + logo_h={req.logo_h} + padding={BELOW_LOGO_PADDING}px")
+
+                for i, text in enumerate(wm_texts):
+                    escaped_text = text.replace(':', '\\:').replace("'", "\\'")
+                    current_y = wm_y + (i * wm_line_spacing)
+
+                    # Layer 1: Shadow
+                    video_chain += (
+                        f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
+                        f":fontcolor=black@0.8:x={wm_x + 3}:y={current_y + 3}:borderw=0"
+                    )
+                    # Layer 2: Border đen
+                    video_chain += (
+                        f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
+                        f":fontcolor=black:x={wm_x}:y={current_y}:borderw=4:bordercolor=black"
+                    )
+                    # Layer 3: Text vàng + viền cam
+                    video_chain += (
+                        f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
+                        f":fontcolor=yellow:x={wm_x}:y={current_y}:borderw=2:bordercolor=orange"
+                    )
+
+                    print(f"      Dòng {i+1}: '{text}' → y={current_y}")
 
             # ---- Watermark text bounce ----
             if req.branding_text:

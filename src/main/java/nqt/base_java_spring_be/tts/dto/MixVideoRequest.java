@@ -21,4 +21,5 @@ public class MixVideoRequest {
     private String subtitlePath;
     private Integer subtitleFontSize;
     private Integer subtitleBorderWidth;
+    private Boolean watermarkLines;
 }
