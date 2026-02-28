@@ -10,7 +10,7 @@ from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
 DEFAULT_WATERMARK_TEXT = [
-    'Link trọn bộ You.Tube -> Tiểu sử',
+    'Link trọn bộ Diu Tút -> Tiểu sử',
     'NQT DRAMA REVIEW'
 ]
 
