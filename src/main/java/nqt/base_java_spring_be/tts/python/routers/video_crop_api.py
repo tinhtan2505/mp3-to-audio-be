@@ -154,10 +154,12 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
     print(f"   🎨 COLOR GRADING: sat={saturation} con={contrast} bri={brightness} gam={gamma}")
 
     # --- 2. CROP NHẸ (2-4%) + scale lại kích thước gốc ---
+    # Kỹ thuật: crop bỏ viền nhỏ → scale lại → thay đổi pixel hash hoàn toàn
     if video_width and video_height:
-        crop_pct = round(random.uniform(0.02, 0.04), 3)
+        crop_pct = round(random.uniform(0.02, 0.04), 3)   # crop 2-4%
         crop_w   = int(video_width  * (1 - crop_pct))
         crop_h   = int(video_height * (1 - crop_pct))
+        # Đảm bảo chẵn (required by h264)
         crop_w   = crop_w - (crop_w % 2)
         crop_h   = crop_h - (crop_h % 2)
         crop_x   = (video_width  - crop_w) // 2
@@ -191,7 +193,6 @@ def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[
     """
     ============================================================
     CHỐNG BẢN QUYỀN - XỬ LÝ NHẠC NỀN (Bypass audio fingerprint)
-    Sử dụng âm thanh gốc của video ([0:a]) làm nhạc nền.
     Voice AI của user giữ nguyên - KHÔNG transform.
     Chỉ transform nhạc nền để bypass Content ID.
     1. Pitch shift (±0.4 semitone)
@@ -214,13 +215,11 @@ def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[
     params["music_lowpass"]  = music_lowpass
 
     print(f"   🎵 MUSIC TRANSFORMATION (bypass Content ID):")
-    print(f"      • Nguồn: Âm thanh gốc của video [0:a]")
     print(f"      • Pitch Shift: {music_pitch:+.2f} semitones")
     print(f"      • Tempo: {music_tempo:.4f}x ({(music_tempo-1)*100:+.1f}%)")
     print(f"      • High-pass: {music_highpass}Hz | Low-pass: {music_lowpass}Hz")
     print(f"   🎤 VOICE: Giữ nguyên (AI voice - không cần transform)")
 
-    # music_input_label = "[0:a]" — audio gốc từ video input
     chain = f"{music_input_label}"
     if music_pitch != 0:
         rate_factor = round(2 ** (music_pitch / 12), 4)
@@ -239,22 +238,38 @@ def api_mix(req: MixRequest):
     start_time = time.time()
     Logger.section("GHÉP VIDEO (FFMPEG) - CHỐNG BẢN QUYỀN v2.0")
 
+    extracted_audio_temp = None
     ass_temp_path = None
 
     try:
-        vid, voice = req.video_input, req.voice_dub
+        vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
 
         if not os.path.exists(vid): raise FileNotFoundError(f"Thiếu Video: {vid}")
         if not os.path.exists(voice): raise FileNotFoundError(f"Thiếu Voice: {voice}")
 
         m_vol = req.music_volume if req.music_volume is not None else DEFAULT_MUSIC_VOLUME
 
-        # ============================================================
-        # Luôn dùng âm thanh gốc của video ([0:a]) làm nhạc nền
-        # Không cần file nhạc nền ngoài (inst) nữa
-        # ============================================================
-        print("   🎵 Sử dụng âm thanh gốc của video làm nhạc nền ([0:a])")
-        has_music = m_vol > 0
+        # Xử lý trường hợp nhạc nền là video gốc
+        if inst and os.path.normpath(inst) == os.path.normpath(vid):
+            print("   🎵 Phát hiện nhạc nền = video gốc, tự động trích xuất audio...")
+            video_dir = os.path.dirname(vid)
+            extracted_audio = os.path.join(video_dir, f"extracted_audio_{get_timestamp_str()}.mp3")
+            extracted_audio_temp = extracted_audio
+
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", vid, "-vn", "-acodec", "libmp3lame",
+                     "-b:a", "192k", extracted_audio],
+                    capture_output=True, text=True, check=True
+                )
+                inst = extracted_audio
+                print(f"   ✅ Đã trích xuất audio: {extracted_audio}")
+            except subprocess.CalledProcessError as e:
+                print(f"   ⚠️  Không trích xuất được audio từ video gốc: {e}")
+                inst = None
+                extracted_audio_temp = None
+
+        has_music = (m_vol > 0) and inst and os.path.exists(inst)
 
         video_dir = os.path.dirname(vid)
         out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
@@ -269,9 +284,7 @@ def api_mix(req: MixRequest):
         if video_width and video_height:
             print(f"   📐 Kích thước video: {video_width}x{video_height}")
 
-        # Chỉ cần 2 input: video gốc + voice dub
-        # [0:v] = video gốc, [0:a] = audio gốc (nhạc nền), [1:a] = voice dub
-        inputs = ["-i", vid, "-i", voice]
+        inputs = []
         filters = []
 
         # ============================================================
@@ -281,6 +294,7 @@ def api_mix(req: MixRequest):
         print("   🛡️  CHỐNG BẢN QUYỀN - VIDEO TRANSFORMATION")
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
+        # Build video chain với copyright bypass đầy đủ
         base_chain = f"[0:v]"
         video_chain, video_transform_params = build_copyright_bypass_video_chain(
             base_chain, video_width, video_height
@@ -298,6 +312,7 @@ def api_mix(req: MixRequest):
             # ---- VIETSUB: convert SRT → ASS ----
             has_subtitle = req.subtitle_path and os.path.exists(req.subtitle_path)
 
+            # Nếu không tìm thấy subtitle, tự động tìm file SRT có "vi_FULL" trong tên
             if not has_subtitle:
                 video_dir_sub = os.path.dirname(vid)
                 found_srt = None
@@ -357,16 +372,18 @@ def api_mix(req: MixRequest):
                 else:
                     print(f"   📝 Vietsub: TẮT")
 
-            # ---- WATERMARK TEXT ----
+            # ---- WATERMARK TEXT (hiển thị ngay dưới vietsub) ----
             if req.watermark_lines:
                 wm_texts = DEFAULT_WATERMARK_TEXT
 
                 vw = video_width  or 720
                 vh = video_height or 1280
 
+                # Đặt watermark ngay dưới vùng logo + padding 8px
                 BELOW_LOGO_PADDING = 16
                 wm_y = req.logo_y + req.logo_h + BELOW_LOGO_PADDING
 
+                # Font size và line spacing theo chiều cao video
                 if vh <= 1300:
                     wm_x         = 65
                     wm_font_size = 30
@@ -383,14 +400,17 @@ def api_mix(req: MixRequest):
                     escaped_text = text.replace(':', '\\:').replace("'", "\\'")
                     current_y = wm_y + (i * wm_line_spacing)
 
+                    # Layer 1: Shadow
                     video_chain += (
                         f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
                         f":fontcolor=black@0.8:x={wm_x + 3}:y={current_y + 3}:borderw=0"
                     )
+                    # Layer 2: Border đen
                     video_chain += (
                         f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
                         f":fontcolor=black:x={wm_x}:y={current_y}:borderw=4:bordercolor=black"
                     )
+                    # Layer 3: Text vàng + viền cam
                     video_chain += (
                         f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
                         f":fontcolor=yellow:x={wm_x}:y={current_y}:borderw=2:bordercolor=orange"
@@ -434,9 +454,13 @@ def api_mix(req: MixRequest):
                 video_chain += "[v_delogo]"
                 filters.append(video_chain)
 
-                # inputs: [0]=video, [1]=voice, [2]=brand_img
-                inputs = ["-i", vid, "-i", voice, "-i", brand_img_path]
-                brand_idx = 2
+                inputs = ["-i", vid]
+                if has_music:
+                    inputs.extend(["-i", inst, "-i", voice, "-i", brand_img_path])
+                    brand_idx = 3
+                else:
+                    inputs.extend(["-i", voice, "-i", brand_img_path])
+                    brand_idx = 2
 
                 filters.append(f"[{brand_idx}:v]scale=80:80[v_brand]")
                 filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
@@ -447,48 +471,47 @@ def api_mix(req: MixRequest):
                 filters.append(video_chain)
                 video_map = "[v_out]"
 
-                # inputs: [0]=video, [1]=voice
-                inputs = ["-i", vid, "-i", voice]
+                inputs = ["-i", vid]
+                if has_music:
+                    inputs.extend(["-i", inst, "-i", voice])
+                else:
+                    inputs.extend(["-i", voice])
         else:
             video_chain += "[v_out]"
             filters.append(video_chain)
             video_map = "[v_out]"
 
-            # inputs: [0]=video, [1]=voice
-            inputs = ["-i", vid, "-i", voice]
+            inputs = ["-i", vid]
+            if has_music:
+                inputs.extend(["-i", inst, "-i", voice])
+            else:
+                inputs.extend(["-i", voice])
 
         # ============================================================
         # PHẦN 2: XỬ LÝ AUDIO - CHỐNG BẢN QUYỀN NÂNG CAO
-        # Dùng [0:a] = audio gốc video làm nhạc nền
-        # Dùng [1:a] = voice dub (AI voice)
         # ============================================================
         print("\n   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("   🛡️  CHỐNG BẢN QUYỀN - AUDIO TRANSFORMATION")
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        # Xác định index của voice dub trong inputs
-        # inputs luôn là: [0]=video, [1]=voice (hoặc [2]=voice nếu có brand_img)
-        if req.remove_logo and req.branding_image_path and os.path.exists(req.branding_image_path or ""):
-            voice_input_idx = 1  # brand_img ở [2], voice ở [1]
-        else:
-            voice_input_idx = 1  # voice luôn ở [1]
-
         if has_music:
-            print(f"   🎚️  Chế độ: MIXING (Giọng AI + Nhạc gốc video)")
+            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền)")
             duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
+            voice_idx = 2
+            music_idx = 1
 
-            # Voice AI: boost volume + bass, giữ nguyên chất lượng
+            # Voice: giữ nguyên chất lượng AI voice, chỉ boost volume + bass
             voice_final = (
-                f"[{voice_input_idx}:a]"
+                f"[{voice_idx}:a]"
                 f"volume={req.voice_volume or 3.0},"
                 f"lowshelf=g=5:f=100:w=0.5[voice]"
             )
             filters.append(voice_final)
             filters.append(f"[voice]asplit[v_trig][v_mix]")
 
-            # Nhạc nền = audio gốc video [0:a], transform để bypass Content ID
+            # Music: transform để bypass Content ID
             music_filter, music_params = build_music_copyright_bypass(
-                "[0:a]", m_vol   # <-- dùng [0:a] thay vì file nhạc ngoài
+                f"[{music_idx}:a]", m_vol
             )
             music_pitch    = music_params["music_pitch"]
             music_highpass = music_params["music_highpass"]
@@ -500,7 +523,8 @@ def api_mix(req: MixRequest):
             filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
 
         else:
-            print(f"   🎚️  Chế độ: VOICE ONLY (music_volume=0)")
+            print(f"   🎚️  Chế độ: VOICE ONLY")
+            voice_idx = 1
             music_pitch = None
             music_highpass = None
             music_lowpass = None
@@ -508,7 +532,7 @@ def api_mix(req: MixRequest):
 
             # Voice only: giữ nguyên, chỉ boost volume + bass
             voice_final = (
-                f"[{voice_input_idx}:a]"
+                f"[{voice_idx}:a]"
                 f"volume={req.voice_volume or 3.0},"
                 f"lowshelf=g=5:f=100:w=0.5[a_out]"
             )
@@ -517,8 +541,9 @@ def api_mix(req: MixRequest):
         filter_complex = ";".join(filters)
 
         # ============================================================
-        # ENCODE
+        # ENCODE - dùng metadata khác để bypass fingerprint
         # ============================================================
+        # Randomize encoding params nhẹ để thay đổi file hash
         crf_value = random.choice([22, 23, 24])
         preset_choice = random.choice(["medium", "slow"])
 
@@ -526,6 +551,7 @@ def api_mix(req: MixRequest):
             "-filter_complex", filter_complex,
             "-map", video_map, "-map", "[a_out]",
             "-c:v", "libx264", "-preset", preset_choice, "-crf", str(crf_value),
+            # THÊM: metadata để thể hiện đây là video gốc
             "-metadata", f"comment=Processed_{get_timestamp_str()}",
             "-metadata", "encoder=CustomEncoder",
             "-c:a", "aac", "-b:a", "192k",
@@ -538,7 +564,8 @@ def api_mix(req: MixRequest):
 
         print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
         print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
-        print(f"   🎵 Nhạc nền: Audio gốc video [0:a] (m_vol={m_vol})")
+        if has_music:
+            print(f"   🎵 Music: {inst} ({os.path.getsize(inst)} bytes)")
 
         print("\n" + "="*60)
         render_start = time.time()
@@ -591,12 +618,13 @@ def api_mix(req: MixRequest):
         render_time = time.time() - render_start
 
         # Cleanup temp files
-        if ass_temp_path and os.path.exists(ass_temp_path):
-            try:
-                os.remove(ass_temp_path)
-                print(f"   🗑️  Đã xóa file tạm: {ass_temp_path}")
-            except Exception as e:
-                print(f"   ⚠️  Không xóa được file tạm: {e}")
+        for tmp in [extracted_audio_temp, ass_temp_path]:
+            if tmp and os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                    print(f"   🗑️  Đã xóa file tạm: {tmp}")
+                except Exception as e:
+                    print(f"   ⚠️  Không xóa được file tạm: {e}")
 
         Logger.success("XỬ LÝ THÀNH CÔNG!", total_time)
         print(f"   ⏱️  Thời gian render: {render_time:.2f}s")
@@ -621,7 +649,6 @@ def api_mix(req: MixRequest):
                     "hue_shift": video_transform_params.get("hue_shift"),
                 },
                 "audio_transform": {
-                    "music_source": "original_video_audio",
                     "music_pitch": music_pitch,
                     "music_tempo": music_tempo,
                     "music_highpass": music_highpass,
@@ -640,14 +667,16 @@ def api_mix(req: MixRequest):
     except subprocess.CalledProcessError as e:
         err_msg = e.stderr if isinstance(e.stderr, str) else str(e)
         print("\n❌ LỖI FFMPEG:\n" + "\n".join(err_msg.splitlines()[-10:]))
-        if ass_temp_path and os.path.exists(ass_temp_path):
-            try: os.remove(ass_temp_path)
-            except: pass
+        for tmp in [extracted_audio_temp, ass_temp_path]:
+            if tmp and os.path.exists(tmp):
+                try: os.remove(tmp)
+                except: pass
         raise HTTPException(500, "Lỗi khi chạy FFmpeg")
 
     except Exception as e:
         Logger.error("Lỗi hệ thống", e)
-        if ass_temp_path and os.path.exists(ass_temp_path):
-            try: os.remove(ass_temp_path)
-            except: pass
+        for tmp in [extracted_audio_temp, ass_temp_path]:
+            if tmp and os.path.exists(tmp):
+                try: os.remove(tmp)
+                except: pass
         raise HTTPException(500, str(e))
