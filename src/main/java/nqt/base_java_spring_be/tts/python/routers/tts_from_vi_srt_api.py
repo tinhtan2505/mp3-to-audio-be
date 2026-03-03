@@ -19,7 +19,7 @@ class TtsFromViSrtRequest(BaseModel):
     vi_srt_path: str  # Đường dẫn đến file SRT VI
 
 
-async def generate_tts_with_speedup(text, voice, output_file, available_space, rate="+0%", metadata_cache=None):
+async def generate_tts_with_speedup(text, voice, output_file, available_space, rate="+0%", metadata_cache=None, index=None):
     """
     Tạo TTS với tự động tăng tốc nếu audio quá dài
 
@@ -128,7 +128,7 @@ async def generate_tts_with_speedup(text, voice, output_file, available_space, r
         }
 
     except Exception as e:
-        print(f"      ❌ TTS error: {str(e)[:100]}")
+        print(f"      ❌ TTS error [index={index}]: {str(e)[:100]}")
         if os.path.exists(tmp_file):
             try:
                 os.remove(tmp_file)
@@ -209,14 +209,8 @@ async def tts_batch_processing(vi_srt_path):
         # Tự động tính BATCH_SIZE
         if total_subs < 100:
             BATCH_SIZE = 20
-        elif total_subs < 500:
-            BATCH_SIZE = 30
-        elif total_subs < 1000:
-            BATCH_SIZE = 40
-        elif total_subs < 3000:
-            BATCH_SIZE = 50
         else:
-            BATCH_SIZE = 60
+            BATCH_SIZE = 30
 
         MAX_CONCURRENT_TASKS = 50
         SAFETY_GAP = 0.1  # Khoảng cách an toàn giữa các câu
@@ -325,10 +319,12 @@ async def tts_batch_processing(vi_srt_path):
                             item['output_path'],
                             item['available_space'],
                             rate="+0%",
-                            metadata_cache=metadata_cache  # Truyền cache vào
+                            metadata_cache=metadata_cache,  # Truyền cache vào
+                            index=item['index']
                         )
                         return item['index'], result
                     except Exception as e:
+                        print(f"      ❌ Index {item['index']} lỗi: {str(e)[:80]}")
                         return item['index'], {
                             'success': False,
                             'duration': 0,
@@ -395,9 +391,12 @@ async def tts_batch_processing(vi_srt_path):
                             tts_files_list.append(output_file)
                     else:
                         failed_count += 1
+                        print(f"      ❌ Index {idx} thất bại")
 
             except asyncio.TimeoutError:
                 print(f"⚠️ Batch {batch_num} timeout - bỏ qua và tiếp tục")
+                failed_indices = [item['index'] for item in batch_data]
+                print(f"   ❌ Các index bị timeout: {failed_indices}")
                 failed_count += len(batch_data)
                 continue
 
