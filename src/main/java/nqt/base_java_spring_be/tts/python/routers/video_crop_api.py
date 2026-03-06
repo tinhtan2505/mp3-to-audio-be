@@ -20,20 +20,80 @@ DEFAULT_WATERMARK_TEXT = [
 # Thêm: Crop/flip nhẹ | Speed variation | Audio fingerprint bypass
 # ============================================================
 
+
+# ============================================================
+# VIETSUB - TÁCH CÂU DÀI (v2.0)
+# Tự động chia câu dài thành nhiều dòng ngắn,
+# phân bổ thời gian theo tỉ lệ độ dài ký tự từng câu.
+# ============================================================
+
+def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
+    """
+    Tách text thành các câu ngắn dựa trên dấu câu.
+    Thứ tự ưu tiên tách:
+      1. \\N  (xuống dòng trong ASS)
+      2. !  ?  (dấu kết thúc câu mạnh)
+      3. ,   (dấu phẩy - chỉ tách nếu câu vẫn > max_chars)
+    """
+    # Bước 1: tách theo \\N
+    parts = re.split(r'\\N', text)
+
+    result = []
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        # Bước 2: tách theo ! ?
+        sub_parts = re.split(r'(?<=[!?])\s+', part)
+
+        for sub in sub_parts:
+            sub = sub.strip()
+            if not sub:
+                continue
+
+            # Bước 3: nếu vẫn dài hơn max_chars → tách theo dấu phẩy
+            if len(sub) > max_chars:
+                comma_parts = re.split(r'(?<=,)\s+', sub)
+                for cp in comma_parts:
+                    cp = cp.strip()
+                    if cp:
+                        result.append(cp)
+            else:
+                result.append(sub)
+
+    return result if result else [text.strip()]
+
+
+def _srt_time_to_ms(ts: str) -> int:
+    """Chuyển SRT timestamp (HH:MM:SS,mmm) sang milliseconds."""
+    ts = ts.strip()
+    h, m, rest = ts.split(":")
+    s, ms = rest.split(",")
+    return int(h) * 3600000 + int(m) * 60000 + int(s) * 1000 + int(ms)
+
+
+def _ms_to_ass_time(ms: int) -> str:
+    """Chuyển milliseconds sang ASS timestamp (H:MM:SS.cc)."""
+    ms = max(0, ms)
+    h = ms // 3600000; ms %= 3600000
+    m = ms // 60000;   ms %= 60000
+    s = ms // 1000;    ms %= 1000
+    cs = ms // 10
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+
 def _srt_to_ass(srt_path: str, ass_path: str, video_w: int, video_h: int,
                 font_size: int, outline: int, margin_v: int):
     """
-    Convert file SRT → ASS với style tùy chỉnh vị trí và font.
+    Convert file SRT -> ASS với style tùy chỉnh vị trí và font.
     Dùng pure Python, không cần thư viện ngoài.
     Alignment=2 (bottom-center), MarginV tính từ dưới lên.
-    """
-    def _srt_time_to_ass(ts: str) -> str:
-        ts = ts.strip().replace(",", ".")
-        h, m, rest = ts.split(":", 2)
-        s, ms = rest.split(".")
-        ms = ms[:2]
-        return f"{int(h)}:{m}:{s}.{ms}"
 
+    TÍNH NĂNG MỚI (v2.0):
+      - Tự động tách câu dài thành nhiều dòng ngắn hơn.
+      - Phân bổ thời gian hiển thị theo tỉ lệ độ dài ký tự từng câu.
+    """
     ass_header = f"""\ufeff[Script Info]
 ScriptType: v4.00+
 PlayResX: {video_w}
@@ -53,6 +113,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     blocks = re.split(r"\n\s*\n", content.strip())
     events = []
+    split_count = 0
+
     for block in blocks:
         lines = block.strip().splitlines()
         if len(lines) < 3:
@@ -60,12 +122,43 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         timecode_line = lines[1]
         if "-->" not in timecode_line:
             continue
+
         start_raw, end_raw = timecode_line.split("-->")
-        start_ass = _srt_time_to_ass(start_raw)
-        end_ass   = _srt_time_to_ass(end_raw)
-        text = r"\N".join(lines[2:])
-        text = text.replace("{", r"\{").replace("}", r"\}")
-        events.append(f"Dialogue: 0,{start_ass},{end_ass},Default,,0,0,0,,{text}")
+
+        # Chuyển sang ms để tính chia thời gian chính xác
+        start_ms = _srt_time_to_ms(start_raw.strip())
+        end_ms   = _srt_time_to_ms(end_raw.strip())
+
+        # Gộp text nhiều dòng, escape ký tự đặc biệt ASS
+        raw_text = r"\N".join(lines[2:])
+        raw_text = raw_text.replace("{", r"\{").replace("}", r"\}")
+
+        # Tách câu dài thành các câu ngắn hơn
+        sentences = _split_text_into_sentences(raw_text, max_chars=35)
+
+        if len(sentences) <= 1:
+            # Không cần tách - giữ nguyên
+            events.append(
+                f"Dialogue: 0,{_ms_to_ass_time(start_ms)},{_ms_to_ass_time(end_ms)},"
+                f"Default,,0,0,0,,{raw_text}"
+            )
+        else:
+            # Tách và phân bổ thời gian theo tỉ lệ độ dài ký tự
+            split_count += 1
+            total_chars    = sum(len(s) for s in sentences)
+            total_duration = end_ms - start_ms
+            current_ms     = start_ms
+
+            for i, sentence in enumerate(sentences):
+                char_ratio = len(sentence) / total_chars
+                duration   = int(total_duration * char_ratio)
+                seg_end_ms = end_ms if i == len(sentences) - 1 else current_ms + duration
+
+                events.append(
+                    f"Dialogue: 0,{_ms_to_ass_time(current_ms)},{_ms_to_ass_time(seg_end_ms)},"
+                    f"Default,,0,0,0,,{sentence}"
+                )
+                current_ms = seg_end_ms
 
     with open(ass_path, "w", encoding="utf-8") as f:
         f.write(ass_header)
@@ -73,6 +166,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         f.write("\n")
 
     print(f"   📄 ASS: {len(events)} dòng | PlayRes={video_w}x{video_h} | MarginV={margin_v}")
+    if split_count > 0:
+        print(f"   ✂️  Đã tách {split_count} block câu dài thành nhiều dòng ngắn hơn")
 
 
 router = APIRouter()
@@ -154,12 +249,10 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
     print(f"   🎨 COLOR GRADING: sat={saturation} con={contrast} bri={brightness} gam={gamma}")
 
     # --- 2. CROP NHẸ (2-4%) + scale lại kích thước gốc ---
-    # Kỹ thuật: crop bỏ viền nhỏ → scale lại → thay đổi pixel hash hoàn toàn
     if video_width and video_height:
-        crop_pct = round(random.uniform(0.02, 0.04), 3)   # crop 2-4%
+        crop_pct = round(random.uniform(0.02, 0.04), 3)
         crop_w   = int(video_width  * (1 - crop_pct))
         crop_h   = int(video_height * (1 - crop_pct))
-        # Đảm bảo chẵn (required by h264)
         crop_w   = crop_w - (crop_w % 2)
         crop_h   = crop_h - (crop_h % 2)
         crop_x   = (video_width  - crop_w) // 2
@@ -294,7 +387,6 @@ def api_mix(req: MixRequest):
         print("   🛡️  CHỐNG BẢN QUYỀN - VIDEO TRANSFORMATION")
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        # Build video chain với copyright bypass đầy đủ
         base_chain = f"[0:v]"
         video_chain, video_transform_params = build_copyright_bypass_video_chain(
             base_chain, video_width, video_height
@@ -379,11 +471,9 @@ def api_mix(req: MixRequest):
                 vw = video_width  or 720
                 vh = video_height or 1280
 
-                # Đặt watermark ngay dưới vùng logo + padding 8px
                 BELOW_LOGO_PADDING = 16
                 wm_y = req.logo_y + req.logo_h + BELOW_LOGO_PADDING
 
-                # Font size và line spacing theo chiều cao video
                 if vh <= 1300:
                     wm_x         = 65
                     wm_font_size = 30
@@ -543,7 +633,6 @@ def api_mix(req: MixRequest):
         # ============================================================
         # ENCODE - dùng metadata khác để bypass fingerprint
         # ============================================================
-        # Randomize encoding params nhẹ để thay đổi file hash
         crf_value = random.choice([22, 23, 24])
         preset_choice = random.choice(["medium", "slow"])
 
@@ -551,7 +640,6 @@ def api_mix(req: MixRequest):
             "-filter_complex", filter_complex,
             "-map", video_map, "-map", "[a_out]",
             "-c:v", "libx264", "-preset", preset_choice, "-crf", str(crf_value),
-            # THÊM: metadata để thể hiện đây là video gốc
             "-metadata", f"comment=Processed_{get_timestamp_str()}",
             "-metadata", "encoder=CustomEncoder",
             "-c:a", "aac", "-b:a", "192k",
