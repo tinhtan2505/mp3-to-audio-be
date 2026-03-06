@@ -3,16 +3,7 @@ import os
 import time
 import re
 import torch
-
-_original_torch_load = torch.load
-
-def _patched_torch_load(f, map_location=None, pickle_module=None, weights_only=None, **kwargs):
-    return _original_torch_load(f, map_location=map_location, weights_only=False, **kwargs)
-
-torch.load = _patched_torch_load
-print("   ✅ [Torch Fix] Đã patch torch.load -> weights_only=False")
-
-import whisperx
+from faster_whisper import WhisperModel
 from google import genai
 from google.genai.types import GenerateContentConfig, GoogleSearch
 from openai import OpenAI
@@ -49,25 +40,32 @@ def check_system_requirements():
         Logger.warning("⚠️ Không phát hiện GPU - Hệ thống sẽ chạy chậm trên CPU")
 
 def load_ai_models():
-    Logger.section(f"BƯỚC 2: TẢI CÁC MODEL AI (CHẾ ĐỘ: WHISPERX)")
+    Logger.section(f"BƯỚC 2: TẢI CÁC MODEL AI (CHẾ ĐỘ: {WHISPER_BACKEND.upper()})")
 
-    # 1. Load WhisperX
-    print(f"\n⏳ Đang tải WhisperX Model: {WHISPER_MODEL_SIZE}...")
+    # 1. Load Whisper
+    print(f"\n⏳ Đang tải Whisper Model: {WHISPER_MODEL_SIZE}...")
     start = time.time()
     try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
+        if WHISPER_BACKEND == "faster":
+            cpu_count = os.cpu_count() or 4
+            optimal_threads = max(cpu_count - 2, 4)
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
 
-        print(f"   🎮 Chế độ: {device.upper()} | Compute: {compute_type}")
-        # Khởi tạo WhisperX
-        AI_MODELS["whisper"] = whisperx.load_model(
-            WHISPER_MODEL_SIZE,
-            device,
-            compute_type=compute_type
-        )
-        Logger.success(f"WhisperX đã tải xong", time.time() - start)
+            print(f"   🎮 Chế độ: {device.upper()} | Compute: {compute_type} | Threads: {optimal_threads}")
+            AI_MODELS["whisper"] = WhisperModel(
+                model_size_or_path=WHISPER_MODEL_SIZE,
+                device=device,
+                compute_type=compute_type,
+                cpu_threads=optimal_threads,
+                num_workers=2
+            )
+            Logger.success(f"Faster-Whisper đã tải xong", time.time() - start)
+        else:
+            # AI_MODELS["whisper"] = whisper.load_model(WHISPER_MODEL_SIZE, device=AI_MODELS["device"])
+            Logger.success(f"OpenAI-Whisper đã tải xong", time.time() - start)
     except Exception as e:
-        Logger.error("Lỗi tải WhisperX", e)
+        Logger.error("Lỗi tải Whisper", e)
 
     # 2. Config Gemini - ĐÚNG CHO PHIÊN BẢN 1.60.0
     AI_MODELS["gemini_client"] = None
@@ -123,6 +121,7 @@ def call_gemini_api(text_list):
         try:
             time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
+            # CÁCH GỌI ĐÚNG cho v1.60.0
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=prompt_content,
@@ -132,6 +131,7 @@ def call_gemini_api(text_list):
                 )
             )
 
+            # Kiểm tra response có text không
             if not hasattr(response, 'text'):
                 print(f"      [Gemini] Response không có text attribute")
                 continue

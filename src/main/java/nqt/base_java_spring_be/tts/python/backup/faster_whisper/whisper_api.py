@@ -13,8 +13,6 @@ from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
 from google.genai.types import GenerateContentConfig
 from google import genai
-import whisperx
-
 from ai_core import AI_MODELS
 from config import (
     WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE,
@@ -669,22 +667,26 @@ def translate_file_background(file_path, translated_files_list, lock, tts_files_
 
 
 # ============================================================================
-# HÀM XỬ LÝ FILE ĐƠN LẺ VỚI WHISPERX
+# HÀM XỬ LÝ FILE ĐƠN LẺ (TÁCH RA ĐỂ TÁI SỬ DỤNG)
 # ============================================================================
 
 def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
     if not os.path.exists(path):
         raise FileNotFoundError(f"File không tồn tại: {path}")
 
-    Logger.section("WHISPERX - TÁCH LỜI THOẠI (BATCH INFERENCE)")
+    Logger.section("WHISPER - TÁCH LỜI THOẠI (TỐI ƯU STREAMING)")
     print(f"   📂 Đầu vào: {os.path.basename(path)} ({os.path.getsize(path) / (1024*1024):.2f} MB)")
-    print(f"   ⚙️  Chế độ: WhisperX tự động chia ({MAX_SEGMENTS_PER_FILE} câu/file)")
+    print(f"   ⚙️  Chế độ: Streaming thời gian thực + Tự động chia ({MAX_SEGMENTS_PER_FILE} câu/file)")
+    print(f"   🔧 Engine: {WHISPER_BACKEND}")
 
     with GEMINI_STATE['lock']:
         GEMINI_STATE['failed_keys'].clear()
         print(f"   🔑 Đã reset danh sách key - Sẵn sàng dùng {len(GEMINI_API_KEYS)} key")
 
     start_w = time.time()
+
+    if WHISPER_BACKEND != "faster":
+        raise HTTPException(400, "Chế độ này chỉ hỗ trợ faster-whisper")
 
     out_dir = os.path.dirname(path)
     base_filename = os.path.splitext(os.path.basename(path))[0].split('_')[0]
@@ -717,179 +719,15 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
         'duplicates': 0,
         'files_created': 0,
         'avg_segment_length': 0,
+        'last_log_time': start_w,
+        'segments_since_log': 0
     }
 
     print(f"\n{'='*70}")
-    print(f"🚀 BẮT ĐẦU CHUYỂN ÂM THANH THÀNH VĂN BẢN (WHISPERX)...")
+    print(f"🚀 BẮT ĐẦU CHUYỂN ÂM THANH THÀNH VĂN BẢN...")
     print(f"{'='*70}\n")
 
     try:
-        print(f"   ✓ Đang tải audio vào bộ nhớ...")
-        audio = whisperx.load_audio(path)
-
-        print(f"   ⏳ Đang xử lý bóc băng audio...\n")
-        init_time = time.time()
-
-        result = AI_MODELS["whisper"].transcribe(
-            audio,
-            batch_size=16,
-            language="zh",
-            chunk_size=10,      # Chia audio thành chunk 10 giây (default 30s)
-        )
-
-        init_elapsed = time.time() - init_time
-        detected_language = result.get("language", "zh")
-        print(f"   ✓ Dịch thô hoàn tất: {init_elapsed:.2f}s")
-        print(f"   🌍 Ngôn ngữ: {detected_language}")
-
-        # Bước Alignment của WhisperX để tạo word-level timestamps chính xác
-        try:
-            print(f"   ⏳ Đang chạy mô hình Alignment để tối ưu timestamp...")
-            align_start = time.time()
-            model_a, metadata = whisperx.load_align_model(language_code=detected_language, device=AI_MODELS["device"])
-            result = whisperx.align(result["segments"], model_a, metadata, audio, AI_MODELS["device"], return_char_alignments=False)
-            print(f"   ✓ Căn chỉnh thời gian xong: {time.time() - align_start:.2f}s")
-        except Exception as e:
-            print(f"   ⚠️ Có lỗi khi chạy mô hình alignment, sử dụng kết quả WhisperX gốc: {e}")
-
-        # =====================================================================
-        # TÁCH SEGMENT THÔNG MINH CHO TIẾNG TRUNG
-        # Tiếng Trung không có space giữa từ -> word timestamps liền nhau
-        # Ưu tiên: dấu câu trong text > khoảng nghỉ thực > giới hạn cứng
-        # =====================================================================
-        SPLIT_PAUSE_MIN     = 0.08   # giây - khoảng nghỉ âm thanh tối thiểu để tách
-        SPLIT_PAUSE_IDEAL   = 0.40   # giây - khoảng nghỉ ưu tiên cao
-        MAX_SEG_DURATION    = 5.0    # giây - tách bắt buộc nếu vượt
-        MAX_SEG_CHARS       = 25     # ký tự - tách bắt buộc nếu vượt
-        MIN_SEG_CHARS       = 3      # ký tự tối thiểu của 1 segment
-
-        # Dấu câu kết thúc: tách NGAY sau ký tự này
-        PUNCT_BREAK = set("。！？…!?")
-        # Dấu câu tạm nghỉ: tách sau ký tự này nếu có khoảng nghỉ âm thanh
-        PUNCT_PAUSE = set("，,、；;")
-
-        def smart_split_segments(segments):
-            """
-            Tách segment tiếng Trung thông minh:
-            - Scan từng KÝ TỰ trong word text (vì tiếng Trung 1 word = nhiều ký tự)
-            - Ưu tiên 1: Dấu câu kết thúc (。！？) -> tách ngay
-            - Ưu tiên 2: Khoảng nghỉ âm thanh >= SPLIT_PAUSE_IDEAL
-            - Ưu tiên 3: Dấu câu tạm + khoảng nghỉ >= SPLIT_PAUSE_MIN
-            - Ưu tiên 4: Vượt MAX_SEG_DURATION hoặc MAX_SEG_CHARS (tách tại word boundary)
-            - Giữ nguyên tất cả dấu câu trong text output
-            """
-            new_segs = []
-
-            for seg in segments:
-                words     = seg.get("words", [])
-                seg_start = seg.get("start", 0)
-                seg_end   = seg.get("end", 0)
-                seg_text  = seg.get("text", "").strip()
-
-                # Không có word timestamps -> không tách mù, giữ nguyên
-                if not words:
-                    if seg_text:
-                        new_segs.append(seg)
-                    continue
-
-                # ── Gom text và timestamp từng word ──────────────────────
-                # Mỗi word tiếng Trung có thể là 1-3 ký tự
-                # Ta làm việc ở mức WORD (không tách giữa word)
-                current_words = []
-                current_start = words[0].get("start", seg_start)
-
-                for i, w in enumerate(words):
-                    current_words.append(w)
-                    w_end  = w.get("end", w.get("start", seg_start) + 0.15)
-                    w_text = w.get("word", "")
-
-                    # Khoảng nghỉ thực đến word tiếp theo
-                    if i < len(words) - 1:
-                        next_start = words[i + 1].get("start", w_end)
-                        pause_gap  = max(0.0, next_start - w_end)
-                    else:
-                        pause_gap  = 999.0  # từ cuối -> flush
-
-                    current_txt = "".join(x.get("word", "") for x in current_words).strip()
-                    current_dur = w_end - current_start
-                    last_char   = current_txt[-1] if current_txt else ""
-
-                    should_split = False
-                    split_reason = ""
-
-                    # ── Ưu tiên 1: dấu câu kết thúc trong word hiện tại ──
-                    has_break_punct = any(c in PUNCT_BREAK for c in w_text)
-                    if has_break_punct and len(current_txt) >= MIN_SEG_CHARS:
-                        should_split = True
-                        split_reason = f"dấu kết thúc trong '{w_text}'"
-
-                    # ── Ưu tiên 2: khoảng nghỉ âm thanh lớn ─────────────
-                    elif pause_gap >= SPLIT_PAUSE_IDEAL and len(current_txt) >= MIN_SEG_CHARS:
-                        should_split = True
-                        split_reason = f"khoảng nghỉ {pause_gap:.3f}s"
-
-                    # ── Ưu tiên 3: dấu tạm nghỉ + khoảng nghỉ âm thanh ──
-                    elif any(c in PUNCT_PAUSE for c in w_text) and pause_gap >= SPLIT_PAUSE_MIN and len(current_txt) >= MIN_SEG_CHARS:
-                        should_split = True
-                        split_reason = f"dấu tạm + nghỉ {pause_gap:.3f}s"
-
-                    # ── Ưu tiên 4: giới hạn cứng ─────────────────────────
-                    elif (current_dur >= MAX_SEG_DURATION or len(current_txt) >= MAX_SEG_CHARS) and len(current_txt) >= MIN_SEG_CHARS:
-                        should_split = True
-                        split_reason = f"giới hạn {current_dur:.1f}s/{len(current_txt)}ký tự"
-
-                    # ── Flush segment ──────────────────────────────────────
-                    if should_split:
-                        new_segs.append({
-                            "start": round(current_start, 3),
-                            "end":   round(w_end, 3),
-                            "text":  current_txt,
-                            "words": current_words[:]
-                        })
-                        current_words = []
-                        current_start = words[i + 1].get("start", w_end) if i < len(words) - 1 else w_end
-
-                # ── Flush phần còn lại ────────────────────────────────────
-                if current_words:
-                    remaining_txt = "".join(x.get("word", "") for x in current_words).strip()
-                    if len(remaining_txt) >= MIN_SEG_CHARS:
-                        new_segs.append({
-                            "start": round(current_start, 3),
-                            "end":   round(seg_end, 3),
-                            "text":  remaining_txt,
-                            "words": current_words
-                        })
-                    elif remaining_txt and new_segs:
-                        # Nối vào segment trước nếu quá ngắn
-                        prev = new_segs[-1]
-                        new_segs[-1]["end"]   = round(seg_end, 3)
-                        new_segs[-1]["text"]  = prev["text"] + remaining_txt
-                        new_segs[-1]["words"] = prev.get("words", []) + current_words
-
-            return new_segs
-
-        raw_segments = result.get("segments", [])
-        before_count = len(raw_segments)
-        result["segments"] = smart_split_segments(raw_segments)
-        after_count  = len(result["segments"])
-        print(f"   ✂️  Smart split (tiếng Trung): {before_count} → {after_count} segments")
-        print(f"       Nghỉ lý tưởng ≥{SPLIT_PAUSE_IDEAL}s | Dấu+nghỉ ≥{SPLIT_PAUSE_MIN}s | Max {MAX_SEG_DURATION}s / {MAX_SEG_CHARS}ký tự")
-
-        # Nếu cần nhận diện người nói (Diarization)
-        if enable_diarization:
-            try:
-                print(f"   ⏳ Đang chạy mô hình phân tách người nói (Diarization)...")
-                diarize_start = time.time()
-                # Yêu cầu biến môi trường HF_TOKEN đã được cài đặt cho Pyannote
-                diarize_model = whisperx.DiarizationPipeline(use_auth_token=os.environ.get("HF_TOKEN"), device=AI_MODELS["device"])
-                diarize_segments = diarize_model(audio)
-                result = whisperx.assign_word_speakers(diarize_segments, result)
-                print(f"   ✓ Phân tách người nói hoàn tất: {time.time() - diarize_start:.2f}s")
-            except Exception as e:
-                print(f"   ⚠️ Lỗi mô hình Diarization (Vui lòng kiểm tra HF_TOKEN): {e}")
-
-        segments_gen = result["segments"]
-
         part_suffix = f"_part{chunk_index:02d}" if MAX_SEGMENTS_PER_FILE < 9999 else ""
         out_name = f"{base_filename}_cn_{timestamp_str}{part_suffix}.srt"
         current_file_path = os.path.join(out_dir, out_name)
@@ -897,15 +735,34 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
         output_files_list.append(current_file_path)
         stats['files_created'] = 1
 
-        print(f"\n   📄 File số {stats['files_created']}: {out_name}")
-        print(f"   ⏱️  Thời gian ghi SRT bắt đầu: {time.strftime('%H:%M:%S')}\n")
+        print(f"   📄 File số {stats['files_created']}: {out_name}")
+        print(f"   ⏱️  Thời gian bắt đầu: {time.strftime('%H:%M:%S')}\n")
+
+        init_time = time.time()
+        segments_gen, info = AI_MODELS["whisper"].transcribe(
+            path,
+            language="zh",
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=300, speech_pad_ms=200),
+            condition_on_previous_text=False,
+            beam_size=1,
+            best_of=1,
+            temperature=0.0,
+            repetition_penalty=1.2,
+            no_speech_threshold=0.6,
+            word_timestamps=False,
+            compression_ratio_threshold=2.0,
+            log_prob_threshold=-1.0,
+            initial_prompt=None
+        )
+
+        init_elapsed = time.time() - init_time
+        print(f"   ✓ Khởi tạo model: {init_elapsed:.2f}s")
+        print(f"   🌍 Ngôn ngữ: {info.language} (độ tin cậy: {info.language_probability:.2%})")
+        print(f"   ⏳ Đang xử lý các đoạn văn bản...\n")
 
         for seg in segments_gen:
-            if isinstance(seg, dict):
-                start = seg.get("start", 0.0)
-                end = seg.get("end", 0.0)
-                text = seg.get("text", "").strip()
-            elif hasattr(seg, 'start'):
+            if hasattr(seg, 'start'):
                 start = seg.start
                 end = seg.end
                 text = seg.text.strip()
@@ -937,30 +794,36 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
             total_segments += 1
             segments_in_current_file += 1
             stats['total_chars'] += len(text)
+            stats['segments_since_log'] += 1
 
             seen_texts.add(text_normalized)
             last_texts.append(text)
             if len(last_texts) > 5:
                 last_texts.pop(0)
 
-            # Khối thêm Prefix Speaker nếu bật diarization
-            speaker_tag = f"[{seg.get('speaker', 'Unknown')}] " if enable_diarization and 'speaker' in seg else ""
-            final_text = f"{speaker_tag}{text}"
-
             start_ts = format_timestamp(start)
             end_ts = format_timestamp(end)
-            write_srt_line(current_file_handle, total_segments, start_ts, end_ts, final_text)
+            write_srt_line(current_file_handle, total_segments, start_ts, end_ts, text)
 
-            if total_segments % 20 == 0:
-                print(f"   ⚡ Đã ghi {total_segments:4d} câu vào file srt...")
+            now = time.time()
+            if (now - stats['last_log_time'] >= 3.0) or (stats['segments_since_log'] >= 20):
+                elapsed = now - start_w
+                speed = total_segments / (elapsed / 60) if elapsed > 0 else 0
+                progress_pct = (stats['total_duration'] / (elapsed or 1)) * 100
+
+                print(f"   ⚡ [{total_segments:4d}] {text[:45]}{'...' if len(text)>45 else ''}")
+                print(f"      └─ Tốc độ: {speed:.1f} câu/phút | Thời gian: {elapsed:.1f}s | Tiến độ: ~{min(progress_pct, 99):.0f}%")
+
+                stats['last_log_time'] = now
+                stats['segments_since_log'] = 0
 
             if segments_in_current_file >= MAX_SEGMENTS_PER_FILE:
                 current_file_handle.close()
-                elapsed_sofar = time.time() - start_w
+                elapsed = time.time() - start_w
 
                 print(f"\n   ✅ File số {stats['files_created']} hoàn thành: {segments_in_current_file} câu")
                 print(f"      └─ Đường dẫn: {os.path.basename(current_file_path)}")
-                print(f"      └─ Thời gian hiện tại: {elapsed_sofar:.1f}s\n")
+                print(f"      └─ Thời gian: {elapsed:.1f}s\n")
 
                 if GEMINI_API_KEYS:
                     thread = threading.Thread(
@@ -1005,7 +868,7 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
         print(f"   📊 Đã xử lý: {total_segments} câu trước khi bị ngắt")
         print(f"   ⏱️  Thời gian: {time.time() - start_w:.1f}s")
 
-        if current_file_handle and not current_file_handle.closed:
+        if current_file_handle:
             current_file_handle.close()
             interrupted_path = current_file_path.replace('.srt', '_INTERRUPTED.srt')
             os.rename(current_file_path, interrupted_path)
@@ -1021,7 +884,7 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
         print(f"   🔴 Lỗi: {str(e)}")
         print(f"   📊 Đã xử lý: {total_segments} câu trước khi lỗi")
 
-        if current_file_handle and not current_file_handle.closed:
+        if current_file_handle:
             current_file_handle.close()
             error_path = current_file_path.replace('.srt', '_ERROR.srt')
             os.rename(current_file_path, error_path)
@@ -1306,7 +1169,7 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
     print(f"✅ HOÀN TẤT - FILE TTS ĐÃ SẴN SÀNG ĐỂ GHÉP")
     print(f"{'='*70}")
     print(f"📊 THỐNG KÊ:")
-    print(f"   • Ngôn ngữ: {detected_language}")
+    print(f"   • Ngôn ngữ: {info.language} (độ tin cậy: {info.language_probability:.2%})")
     print(f"   • Tổng số câu: {total_segments:,}")
     print(f"   • Số file TTS MP3: {len(tts_files_list)} (đã xử lý thời gian)")
     print(f"   • Metadata timing: tts/timing_metadata.json")
@@ -1325,7 +1188,7 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
 
     return {
         "status": "success",
-        "engine": "whisperx",
+        "engine": "faster-whisper",
         "input_file": os.path.basename(path),
         "total_segments": total_segments,
         "filtered_segments": filtered_count,
