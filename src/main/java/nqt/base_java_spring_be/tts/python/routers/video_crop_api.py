@@ -28,25 +28,33 @@ DEFAULT_WATERMARK_TEXT = [
 # ============================================================
 
 def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
+    # Bước 1: tách theo \\N thủ công
     parts = re.split(r'\\N', text)
     result = []
+
     for part in parts:
         part = part.strip()
         if not part:
             continue
-        sub_parts = re.split(r'(?<=[!?])\s+', part)
+
+        # Bước 2: tách theo dấu câu kết thúc: . ! ? … (giữ dấu câu lại)
+        sub_parts = re.split(r'(?<=[.!?…])\s+', part)
+
         for sub in sub_parts:
             sub = sub.strip()
             if not sub:
                 continue
+
             if len(sub) > max_chars:
-                comma_parts = re.split(r'(?<=,)\s+', sub)
+                # Bước 3: tách theo ; : , (giữ dấu câu lại)
+                comma_parts = re.split(r'(?<=[;:,])\s+', sub)
                 for cp in comma_parts:
                     cp = cp.strip()
                     if cp:
                         result.append(cp)
             else:
                 result.append(sub)
+
     return result if result else [text.strip()]
 
 
