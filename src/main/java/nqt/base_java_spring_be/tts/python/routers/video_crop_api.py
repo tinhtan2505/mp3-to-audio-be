@@ -28,31 +28,17 @@ DEFAULT_WATERMARK_TEXT = [
 # ============================================================
 
 def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
-    """
-    Tách text thành các câu ngắn dựa trên dấu câu.
-    Thứ tự ưu tiên tách:
-      1. \\N  (xuống dòng trong ASS)
-      2. !  ?  (dấu kết thúc câu mạnh)
-      3. ,   (dấu phẩy - chỉ tách nếu câu vẫn > max_chars)
-    """
-    # Bước 1: tách theo \\N
     parts = re.split(r'\\N', text)
-
     result = []
     for part in parts:
         part = part.strip()
         if not part:
             continue
-
-        # Bước 2: tách theo ! ?
         sub_parts = re.split(r'(?<=[!?])\s+', part)
-
         for sub in sub_parts:
             sub = sub.strip()
             if not sub:
                 continue
-
-            # Bước 3: nếu vẫn dài hơn max_chars → tách theo dấu phẩy
             if len(sub) > max_chars:
                 comma_parts = re.split(r'(?<=,)\s+', sub)
                 for cp in comma_parts:
@@ -61,12 +47,10 @@ def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
                         result.append(cp)
             else:
                 result.append(sub)
-
     return result if result else [text.strip()]
 
 
 def _srt_time_to_ms(ts: str) -> int:
-    """Chuyển SRT timestamp (HH:MM:SS,mmm) sang milliseconds."""
     ts = ts.strip()
     h, m, rest = ts.split(":")
     s, ms = rest.split(",")
@@ -74,7 +58,6 @@ def _srt_time_to_ms(ts: str) -> int:
 
 
 def _ms_to_ass_time(ms: int) -> str:
-    """Chuyển milliseconds sang ASS timestamp (H:MM:SS.cc)."""
     ms = max(0, ms)
     h = ms // 3600000; ms %= 3600000
     m = ms // 60000;   ms %= 60000
@@ -85,15 +68,6 @@ def _ms_to_ass_time(ms: int) -> str:
 
 def _srt_to_ass(srt_path: str, ass_path: str, video_w: int, video_h: int,
                 font_size: int, outline: int, margin_v: int):
-    """
-    Convert file SRT -> ASS với style tùy chỉnh vị trí và font.
-    Dùng pure Python, không cần thư viện ngoài.
-    Alignment=2 (bottom-center), MarginV tính từ dưới lên.
-
-    TÍNH NĂNG MỚI (v2.0):
-      - Tự động tách câu dài thành nhiều dòng ngắn hơn.
-      - Phân bổ thời gian hiển thị theo tỉ lệ độ dài ký tự từng câu.
-    """
     ass_header = f"""\ufeff[Script Info]
 ScriptType: v4.00+
 PlayResX: {video_w}
@@ -107,7 +81,6 @@ Style: Default,Arial,{font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-
     with open(srt_path, "r", encoding="utf-8-sig") as f:
         content = f.read()
 
@@ -124,26 +97,20 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
 
         start_raw, end_raw = timecode_line.split("-->")
-
-        # Chuyển sang ms để tính chia thời gian chính xác
         start_ms = _srt_time_to_ms(start_raw.strip())
         end_ms   = _srt_time_to_ms(end_raw.strip())
 
-        # Gộp text nhiều dòng, escape ký tự đặc biệt ASS
         raw_text = r"\N".join(lines[2:])
         raw_text = raw_text.replace("{", r"\{").replace("}", r"\}")
 
-        # Tách câu dài thành các câu ngắn hơn
         sentences = _split_text_into_sentences(raw_text, max_chars=35)
 
         if len(sentences) <= 1:
-            # Không cần tách - giữ nguyên
             events.append(
                 f"Dialogue: 0,{_ms_to_ass_time(start_ms)},{_ms_to_ass_time(end_ms)},"
                 f"Default,,0,0,0,,{raw_text}"
             )
         else:
-            # Tách và phân bổ thời gian theo tỉ lệ độ dài ký tự
             split_count += 1
             total_chars    = sum(len(s) for s in sentences)
             total_duration = end_ms - start_ms
@@ -173,7 +140,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 router = APIRouter()
 
 def get_video_duration(video_path):
-    """Lấy thời lượng video bằng ffprobe"""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -186,7 +152,6 @@ def get_video_duration(video_path):
         return None
 
 def get_video_dimensions(video_path):
-    """Lấy chiều rộng và chiều cao video bằng ffprobe"""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -201,7 +166,6 @@ def get_video_dimensions(video_path):
         return None, None
 
 def parse_ffmpeg_progress(line, total_duration):
-    """Parse output của FFmpeg để lấy tiến độ"""
     time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', line)
     if time_match and total_duration:
         hours, minutes, seconds = map(float, time_match.groups())
@@ -211,31 +175,14 @@ def parse_ffmpeg_progress(line, total_duration):
     return None, None
 
 def escape_srt_path(path: str) -> str:
-    """
-    Escape đường dẫn SRT cho FFmpeg subtitles filter.
-    """
     path = path.replace("\\", "/")
     path = path.replace(":", "\\:")
     return path
 
 
 def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_height: int) -> tuple[str, dict]:
-    """
-    ============================================================
-    CHỐNG BẢN QUYỀN - XỬ LÝ VIDEO (Remake 40%+)
-    Áp dụng các kỹ thuật thay đổi "dấu vân tay" video:
-    1. Color grading (đã có) - đổi màu ngẫu nhiên
-    2. Crop nhẹ + scale lại - thay đổi tỷ lệ khung hình
-    3. Flip ngang ngẫu nhiên (nhẹ - không làm hỏng nội dung)
-    4. Speed variation nhẹ (±2%) - thay đổi tốc độ
-    5. Noise injection siêu nhẹ - thêm grain để bypass hash
-    6. Sharpen / Blur nhẹ - thay đổi texture
-    ============================================================
-    Returns: (modified_chain, params_dict)
-    """
     params = {}
 
-    # --- 1. COLOR GRADING (đổi màu) ---
     saturation  = round(random.uniform(1.15, 1.35), 2)
     contrast    = round(random.uniform(1.08, 1.18), 2)
     brightness  = round(random.uniform(0.02, 0.08), 3)
@@ -248,7 +195,6 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
     chain = f"{base_chain}eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
     print(f"   🎨 COLOR GRADING: sat={saturation} con={contrast} bri={brightness} gam={gamma}")
 
-    # --- 2. CROP NHẸ (2-4%) + scale lại kích thước gốc ---
     if video_width and video_height:
         crop_pct = round(random.uniform(0.02, 0.04), 3)
         crop_w   = int(video_width  * (1 - crop_pct))
@@ -261,19 +207,16 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
         params["crop_pct"] = crop_pct
         print(f"   ✂️  CROP: {crop_pct*100:.1f}% → {crop_w}x{crop_h} → scale lại {video_width}x{video_height}")
 
-    # --- 3. NOISE INJECTION (grain nhẹ - bypass perceptual hash) ---
     noise_strength = round(random.uniform(1.5, 3.5), 1)
     chain += f",noise=alls={noise_strength}:allf=t+u"
     params["noise_strength"] = noise_strength
     print(f"   🌫️  NOISE: strength={noise_strength} (bypass perceptual hash)")
 
-    # --- 4. SHARPEN nhẹ (tăng độ nét sau noise) ---
     sharpen_luma = round(random.uniform(0.3, 0.8), 2)
     chain += f",unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount={sharpen_luma}"
     params["sharpen"] = sharpen_luma
     print(f"   🔍 SHARPEN: luma_amount={sharpen_luma}")
 
-    # --- 5. HUE SHIFT nhẹ (±3 độ) ---
     hue_shift = round(random.uniform(-3, 3), 1)
     chain    += f",hue=h={hue_shift}"
     params["hue_shift"] = hue_shift
@@ -285,42 +228,50 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
 def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[str, dict]:
     """
     ============================================================
-    CHỐNG BẢN QUYỀN - XỬ LÝ NHẠC NỀN (Bypass audio fingerprint)
-    Voice AI của user giữ nguyên - KHÔNG transform.
-    Chỉ transform nhạc nền để bypass Content ID.
-    1. Pitch shift (±0.4 semitone)
-    2. Tempo variation (±1.5%)
-    3. EQ: highpass + lowpass
-    4. Volume adjust
+    XỬ LÝ AUDIO GỐC TIẾNG TRUNG (lồng tiếng phim)
+
+    ⚠️  QUY TẮC SYNC BẮT BUỘC:
+    - `inst` ở đây là audio tiếng Trung gốc của phim (dialogue).
+    - TUYỆT ĐỐI KHÔNG dùng atempo / asetrate / pitch shift.
+    - Bất kỳ thay đổi tempo/pitch nào đều làm lệch thời gian
+      → tiếng Trung và khẩu hình miệng diễn viên MẤT SYNC.
+
+    Chỉ được phép áp dụng các filter KHÔNG ảnh hưởng timing:
+    1. highpass / lowpass  - cắt tần số, timing không đổi
+    2. volume              - điều chỉnh âm lượng, timing không đổi
     ============================================================
     Returns: (filter_string, params_dict)
     """
     params = {}
 
-    music_pitch    = round(random.uniform(-0.4, 0.4), 2)
-    music_tempo    = round(random.uniform(0.985, 1.015), 4)
-    music_highpass = random.randint(60, 100)
-    music_lowpass  = random.randint(15000, 18000)
+    # EQ nhẹ — KHÔNG thay đổi tempo hay pitch
+    music_highpass = random.randint(60, 90)
+    music_lowpass  = random.randint(16000, 18000)
+
+    # Ghi rõ None để caller biết không có transform
+    music_pitch = None
+    music_tempo = None
 
     params["music_pitch"]    = music_pitch
     params["music_tempo"]    = music_tempo
     params["music_highpass"] = music_highpass
     params["music_lowpass"]  = music_lowpass
 
-    print(f"   🎵 MUSIC TRANSFORMATION (bypass Content ID):")
-    print(f"      • Pitch Shift: {music_pitch:+.2f} semitones")
-    print(f"      • Tempo: {music_tempo:.4f}x ({(music_tempo-1)*100:+.1f}%)")
-    print(f"      • High-pass: {music_highpass}Hz | Low-pass: {music_lowpass}Hz")
-    print(f"   🎤 VOICE: Giữ nguyên (AI voice - không cần transform)")
+    print(f"   🎵 AUDIO TIẾNG TRUNG (giữ sync khẩu hình):")
+    print(f"      • Pitch Shift : BỎ QUA ← thay đổi sẽ gây lệch sync!")
+    print(f"      • Tempo       : BỎ QUA ← thay đổi sẽ gây lệch sync!")
+    print(f"      • High-pass   : {music_highpass} Hz")
+    print(f"      • Low-pass    : {music_lowpass} Hz")
+    print(f"      • Volume      : {m_vol}")
+    print(f"   ✅ Timing 100% giữ nguyên → tiếng Trung khớp khẩu hình diễn viên")
 
-    chain = f"{music_input_label}"
-    if music_pitch != 0:
-        rate_factor = round(2 ** (music_pitch / 12), 4)
-        chain += f"asetrate=44100*{rate_factor},atempo={round(1/rate_factor, 4)},"
-    if abs(music_tempo - 1.0) > 0.001:
-        chain += f"atempo={music_tempo},"
-    chain += f"highpass=f={music_highpass},lowpass=f={music_lowpass},"
-    chain += f"volume={m_vol}[bg]"
+    # Chỉ EQ + volume — không có atempo / asetrate
+    chain = (
+        f"{music_input_label}"
+        f"highpass=f={music_highpass},"
+        f"lowpass=f={music_lowpass},"
+        f"volume={m_vol}[bg]"
+    )
 
     return chain, params
 
@@ -367,7 +318,6 @@ def api_mix(req: MixRequest):
         video_dir = os.path.dirname(vid)
         out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
 
-        # Lấy thời lượng và kích thước video
         print("   📊 Đang phân tích video...")
         total_duration = get_video_duration(vid)
         if total_duration:
@@ -380,9 +330,6 @@ def api_mix(req: MixRequest):
         inputs = []
         filters = []
 
-        # ============================================================
-        # PHẦN 1: XỬ LÝ VIDEO - CHỐNG BẢN QUYỀN NÂNG CAO
-        # ============================================================
         print("\n   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("   🛡️  CHỐNG BẢN QUYỀN - VIDEO TRANSFORMATION")
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -401,10 +348,8 @@ def api_mix(req: MixRequest):
             print(f"\n   🛡️  Xóa Logo: BẬT (x={req.logo_x}, y={req.logo_y}, w={req.logo_w}, h={req.logo_h})")
             video_chain += f",delogo=x={req.logo_x}:y={req.logo_y}:w={req.logo_w}:h={req.logo_h}"
 
-            # ---- VIETSUB: convert SRT → ASS ----
             has_subtitle = req.subtitle_path and os.path.exists(req.subtitle_path)
 
-            # Nếu không tìm thấy subtitle, tự động tìm file SRT có "vi_FULL" trong tên
             if not has_subtitle:
                 video_dir_sub = os.path.dirname(vid)
                 found_srt = None
@@ -464,7 +409,6 @@ def api_mix(req: MixRequest):
                 else:
                     print(f"   📝 Vietsub: TẮT")
 
-            # ---- WATERMARK TEXT (hiển thị ngay dưới vietsub) ----
             if req.watermark_lines:
                 wm_texts = DEFAULT_WATERMARK_TEXT
 
@@ -490,17 +434,14 @@ def api_mix(req: MixRequest):
                     escaped_text = text.replace(':', '\\:').replace("'", "\\'")
                     current_y = wm_y + (i * wm_line_spacing)
 
-                    # Layer 1: Shadow
                     video_chain += (
                         f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
                         f":fontcolor=black@0.8:x={wm_x + 3}:y={current_y + 3}:borderw=0"
                     )
-                    # Layer 2: Border đen
                     video_chain += (
                         f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
                         f":fontcolor=black:x={wm_x}:y={current_y}:borderw=4:bordercolor=black"
                     )
-                    # Layer 3: Text vàng + viền cam
                     video_chain += (
                         f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
                         f":fontcolor=yellow:x={wm_x}:y={current_y}:borderw=2:bordercolor=orange"
@@ -508,7 +449,6 @@ def api_mix(req: MixRequest):
 
                     print(f"      Dòng {i+1}: '{text}' → y={current_y}")
 
-            # ---- Watermark text bounce ----
             if req.branding_text:
                 print(f"   💧 Watermark Text: '{req.branding_text}'")
 
@@ -577,20 +517,17 @@ def api_mix(req: MixRequest):
             else:
                 inputs.extend(["-i", voice])
 
-        # ============================================================
-        # PHẦN 2: XỬ LÝ AUDIO - CHỐNG BẢN QUYỀN NÂNG CAO
-        # ============================================================
         print("\n   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("   🛡️  CHỐNG BẢN QUYỀN - AUDIO TRANSFORMATION")
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         if has_music:
-            print(f"   🎚️  Chế độ: MIXING (Giọng + Nhạc nền)")
+            print(f"   🎚️  Chế độ: MIXING (Tiếng Việt lồng + Tiếng Trung gốc)")
             duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
             voice_idx = 2
             music_idx = 1
 
-            # Voice: giữ nguyên chất lượng AI voice, chỉ boost volume + bass
+            # Voice tiếng Việt: boost volume + bass
             voice_final = (
                 f"[{voice_idx}:a]"
                 f"volume={req.voice_volume or 3.0},"
@@ -599,7 +536,7 @@ def api_mix(req: MixRequest):
             filters.append(voice_final)
             filters.append(f"[voice]asplit[v_trig][v_mix]")
 
-            # Music: transform để bypass Content ID
+            # Audio tiếng Trung: CHỈ EQ + volume, KHÔNG pitch/tempo
             music_filter, music_params = build_music_copyright_bypass(
                 f"[{music_idx}:a]", m_vol
             )
@@ -620,7 +557,6 @@ def api_mix(req: MixRequest):
             music_lowpass = None
             music_tempo = None
 
-            # Voice only: giữ nguyên, chỉ boost volume + bass
             voice_final = (
                 f"[{voice_idx}:a]"
                 f"volume={req.voice_volume or 3.0},"
@@ -630,9 +566,6 @@ def api_mix(req: MixRequest):
 
         filter_complex = ";".join(filters)
 
-        # ============================================================
-        # ENCODE - dùng metadata khác để bypass fingerprint
-        # ============================================================
         crf_value = random.choice([22, 23, 24])
         preset_choice = random.choice(["medium", "slow"])
 
@@ -653,7 +586,7 @@ def api_mix(req: MixRequest):
         print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
         print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
         if has_music:
-            print(f"   🎵 Music: {inst} ({os.path.getsize(inst)} bytes)")
+            print(f"   🎵 Music (tiếng Trung): {inst} ({os.path.getsize(inst)} bytes)")
 
         print("\n" + "="*60)
         render_start = time.time()
@@ -705,7 +638,6 @@ def api_mix(req: MixRequest):
         total_time = time.time() - start_time
         render_time = time.time() - render_start
 
-        # Cleanup temp files
         for tmp in [extracted_audio_temp, ass_temp_path]:
             if tmp and os.path.exists(tmp):
                 try:
