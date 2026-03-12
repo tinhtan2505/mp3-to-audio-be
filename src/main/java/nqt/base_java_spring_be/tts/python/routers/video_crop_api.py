@@ -9,10 +9,12 @@ from schemas import MixRequest
 from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
-DEFAULT_WATERMARK_TEXT = [
-    'Link trọn bộ Diu Tút -> Tiểu sử',
-    'NQT DRAMA REVIEW'
-]
+DEFAULT_YOUTUBE = "1"
+
+if DEFAULT_YOUTUBE == "tinh":
+    DEFAULT_BRAND_TEXT = "Tĩnh Ghiền Drama"
+else:
+    DEFAULT_BRAND_TEXT = "Thúy Lụa Drama Review"
 
 # ============================================================
 # CHỐNG BẢN QUYỀN - MODULE NÂNG CAO (v2.0)
@@ -417,48 +419,8 @@ def api_mix(req: MixRequest):
                 else:
                     print(f"   📝 Vietsub: TẮT")
 
-            if req.watermark_lines:
-                wm_texts = DEFAULT_WATERMARK_TEXT
-
-                vw = video_width  or 720
-                vh = video_height or 1280
-
-                BELOW_LOGO_PADDING = 16
-                wm_y = req.logo_y + req.logo_h + BELOW_LOGO_PADDING
-
-                if vh <= 1300:
-                    wm_x         = 65
-                    wm_font_size = 30
-                    wm_line_spacing = 50
-                else:
-                    wm_x         = 120
-                    wm_font_size = 42
-                    wm_line_spacing = 65
-
-                print(f"   💧 Watermark Lines: {len(wm_texts)} dòng | pos=({wm_x},{wm_y}) font={wm_font_size}")
-                print(f"      └─ Dưới logo: logo_y={req.logo_y} + logo_h={req.logo_h} + padding={BELOW_LOGO_PADDING}px")
-
-                for i, text in enumerate(wm_texts):
-                    escaped_text = text.replace(':', '\\:').replace("'", "\\'")
-                    current_y = wm_y + (i * wm_line_spacing)
-
-                    video_chain += (
-                        f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
-                        f":fontcolor=black@0.8:x={wm_x + 3}:y={current_y + 3}:borderw=0"
-                    )
-                    video_chain += (
-                        f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
-                        f":fontcolor=black:x={wm_x}:y={current_y}:borderw=4:bordercolor=black"
-                    )
-                    video_chain += (
-                        f",drawtext=text='{escaped_text}':fontsize={wm_font_size}"
-                        f":fontcolor=yellow:x={wm_x}:y={current_y}:borderw=2:bordercolor=orange"
-                    )
-
-                    print(f"      Dòng {i+1}: '{text}' → y={current_y}")
-
             if req.branding_text:
-                print(f"   💧 Watermark Text: '{req.branding_text}'")
+                print(f"   💧 Watermark Text: '{DEFAULT_BRAND_TEXT}'")
 
                 font_size_wm = 28
                 alpha = round(random.uniform(0.25, 0.35), 2)
@@ -471,7 +433,7 @@ def api_mix(req: MixRequest):
 
                 print(f"   📐 Font: {font_size_wm}px | Alpha: {alpha} | Speed: ({speed_x},{speed_y})px/s")
 
-                escaped_text = req.branding_text.replace(':', '\\:').replace("'", "\\'")
+                escaped_text = DEFAULT_BRAND_TEXT.replace(':', '\\:').replace("'", "\\'")
                 margin = 10
                 range_x = f"w-tw-{margin*2}"
                 move_x  = f"abs(mod({start_x}+{speed_x}*{direction_x}*t\\,2*({range_x}))-({range_x}))+{margin}"
@@ -484,7 +446,11 @@ def api_mix(req: MixRequest):
                     f":shadowcolor=black@0.3:shadowx=2:shadowy=2"
                 )
 
-            brand_img_path = req.branding_image_path
+            if DEFAULT_YOUTUBE == "tinh":
+                brand_img_path = "D:/Dubbing/logo_tinh.png"
+            else:
+                brand_img_path = "D:/Dubbing/logo_lua.png"
+
             has_branding = brand_img_path and os.path.exists(brand_img_path)
 
             if has_branding:
@@ -500,8 +466,13 @@ def api_mix(req: MixRequest):
                     inputs.extend(["-i", voice, "-i", brand_img_path])
                     brand_idx = 2
 
-                filters.append(f"[{brand_idx}:v]scale=225:150[v_brand]")
-                filters.append(f"[v_delogo][v_brand]overlay=x=0:y=0[v_out]")
+                if DEFAULT_YOUTUBE == "tinh":
+                    filters.append(f"[{brand_idx}:v]scale=120:120[v_brand]")
+                    filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
+                else:
+                    filters.append(f"[{brand_idx}:v]scale=225:150[v_brand]")
+                    filters.append(f"[v_delogo][v_brand]overlay=x=0:y=0[v_out]")
+
                 video_map = "[v_out]"
             else:
                 print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")

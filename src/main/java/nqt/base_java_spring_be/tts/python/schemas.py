@@ -27,7 +27,6 @@ class MixRequest(BaseModel):
     logo_w: int = 250
     logo_h: int = 40
     branding_text: str = "Thúy Lụa Drama Review"
-    branding_image_path: Optional[str] = "D:/Dubbing/logo.png"
     subtitle_path: Optional[str] = None          # Đường dẫn file .srt vietsub
     subtitle_font_size: int = 28                 # Cỡ chữ subtitle
     subtitle_font_color: str = "white"           # Màu chữ
