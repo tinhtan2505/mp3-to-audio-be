@@ -30,8 +30,21 @@ async def api_tts_batch_from_files_v2(req: TtsBatchFromFilesRequest):
     start_time = time.time()
     try:
         path = os.path.abspath(req.input_srt_path)
+
         if not os.path.exists(path):
-            raise ValueError(f"File SRT không tồn tại: {path}")
+            # Tìm file SRT có chứa "vi_FULL" trong thư mục
+            search_dir = os.path.dirname(path) if not os.path.isdir(path) else path
+            srt_candidates = glob.glob(os.path.join(search_dir, "*vi_FULL*.srt"))
+
+            if not srt_candidates:
+                # Fallback: tìm bất kỳ file .srt nào
+                srt_candidates = glob.glob(os.path.join(search_dir, "*.srt"))
+
+            if not srt_candidates:
+                raise ValueError(f"File SRT không tồn tại và không tìm thấy file SRT nào trong: {search_dir}")
+
+            path = os.path.abspath(srt_candidates[0])
+            print(f"   ⚠️  File SRT không tồn tại, dùng file tìm được: {os.path.basename(path)}")
 
         subs = pysrt.open(path)
         if not subs:
