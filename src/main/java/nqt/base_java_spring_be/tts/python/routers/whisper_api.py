@@ -119,6 +119,56 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
+# ============================================================================
+# HÀM LỌC LẶP TỪ / KÝ TỰ LIÊN TIẾP
+# ============================================================================
+
+def deduplicate_segment_text(text: str, threshold: int = 3) -> str:
+    """
+    Nếu 1 từ/ký tự bị lặp liên tiếp >= threshold lần thì chỉ giữ lại 1.
+
+    Xử lý 2 trường hợp:
+      - Lặp từ phân cách bởi space: "这 这 这 这 这..." -> "这"
+      - Lặp ký tự liền nhau:       "啊啊啊啊啊"       -> "啊"
+
+    Các câu bình thường không bị ảnh hưởng.
+    """
+    if not text:
+        return text
+
+    # ── Trường hợp 1: Lặp từ phân cách bởi space ────────────────────────────
+    words = text.split(' ')
+    if len(words) >= threshold:
+        result_words = []
+        i = 0
+        while i < len(words):
+            result_words.append(words[i])
+            j = i + 1
+            # Đếm run liên tiếp giống nhau
+            while j < len(words) and words[j] == words[i]:
+                j += 1
+            # Nếu run >= threshold thì bỏ hết phần lặp, chỉ giữ 1
+            if j - i >= threshold:
+                i = j
+            else:
+                i += 1
+        text = ' '.join(result_words).strip()
+
+    # ── Trường hợp 2: Lặp ký tự liền nhau ──────────────────────────────────
+    def replace_char_run(m):
+        char = m.group(1)
+        count = len(m.group(0))
+        return char if count >= threshold else m.group(0)
+
+    text = re.sub(r'(.)\1{' + str(threshold - 1) + r',}', replace_char_run, text)
+
+    return text.strip()
+
+
+# ============================================================================
+# GEMINI TRANSLATION
+# ============================================================================
+
 def call_gemini_api(text_list, max_retries=3):
     if not GEMINI_API_KEYS:
         return None
@@ -643,9 +693,20 @@ def tts_file_background(vi_srt_path, tts_files_list, lock):
         print(f"   ❌ [Background TTS] Lỗi: {e}\n")
 
 
-def translate_file_background(file_path, translated_files_list, lock, tts_files_list, tts_lock, tts_threads_list, tts_threads_lock):
+def translate_file_background(file_path, translated_files_list, lock,
+                               tts_files_list, tts_lock,
+                               tts_threads_list, tts_threads_lock,
+                               semaphore):
+    """
+    Dịch file SRT trong background.
+    semaphore giới hạn tối đa 3 luồng dịch chạy đồng thời,
+    tránh gửi quá nhiều request Gemini cùng lúc gây lỗi 429.
+    """
     try:
-        translated_file = translate_srt_file_simple(file_path)
+        print(f"   ⏳ [Background] Chờ slot dịch: {os.path.basename(file_path)}")
+        with semaphore:  # Chờ cho đến khi có slot trống (tối đa 3 luồng)
+            print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(file_path)}")
+            translated_file = translate_srt_file_simple(file_path)
 
         if translated_file:
             with lock:
@@ -698,6 +759,9 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
 
     tts_threads_list = []
     tts_threads_lock = threading.Lock()
+
+    # ── Giới hạn tối đa 3 luồng dịch chạy song song ──────────────────────
+    translation_semaphore = threading.Semaphore(3)
 
     total_segments = 0
     filtered_count = 0
@@ -922,6 +986,9 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
                 stats['empty_segments'] += 1
                 continue
 
+            # ── LỌC LẶP TỪ / KÝ TỰ LIÊN TIẾP (>= 3 lần → giữ 1) ────────
+            text = deduplicate_segment_text(text, threshold=3)
+
             if len(text) < 2:
                 stats['short_segments'] += 1
                 continue
@@ -965,12 +1032,15 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
                 if GEMINI_API_KEYS:
                     thread = threading.Thread(
                         target=translate_file_background,
-                        args=(current_file_path, translated_files_list, translation_lock, tts_files_list, tts_lock, tts_threads_list, tts_threads_lock),
+                        args=(current_file_path, translated_files_list, translation_lock,
+                              tts_files_list, tts_lock,
+                              tts_threads_list, tts_threads_lock,
+                              translation_semaphore),
                         daemon=True
                     )
                     thread.start()
                     translation_threads.append(thread)
-                    print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(current_file_path)}\n")
+                    print(f"   🔄 [Background] Xếp hàng dịch: {os.path.basename(current_file_path)}\n")
 
                 chunk_index += 1
                 segments_in_current_file = 0
@@ -991,12 +1061,15 @@ def _process_single_file(path: str, enable_diarization: bool = False) -> dict:
             if GEMINI_API_KEYS:
                 thread = threading.Thread(
                     target=translate_file_background,
-                    args=(current_file_path, translated_files_list, translation_lock, tts_files_list, tts_lock, tts_threads_list, tts_threads_lock),
+                    args=(current_file_path, translated_files_list, translation_lock,
+                          tts_files_list, tts_lock,
+                          tts_threads_list, tts_threads_lock,
+                          translation_semaphore),
                     daemon=True
                 )
                 thread.start()
                 translation_threads.append(thread)
-                print(f"   🔄 [Background] Bắt đầu dịch: {os.path.basename(current_file_path)}\n")
+                print(f"   🔄 [Background] Xếp hàng dịch: {os.path.basename(current_file_path)}\n")
 
     except KeyboardInterrupt:
         print(f"\n\n{'='*70}")
