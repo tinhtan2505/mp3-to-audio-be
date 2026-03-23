@@ -9,7 +9,7 @@ from schemas import MixRequest
 from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
-DEFAULT_YOUTUBE = "1"
+DEFAULT_YOUTUBE = "tinh"
 
 if DEFAULT_YOUTUBE == "tinh":
     DEFAULT_BRAND_TEXT = "Tĩnh Ghiền Drama"
@@ -231,6 +231,55 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
     chain    += f",hue=h={hue_shift}"
     params["hue_shift"] = hue_shift
     print(f"   🌈 HUE SHIFT: {hue_shift:+.1f}°")
+
+    font_arial = "C\\:/Windows/Fonts/arial.ttf"
+
+    if video_width and video_height:
+        vw = video_width
+        vh = video_height
+
+        # ── TOP: Chúc bạn xem phim vui vẻ ──
+        top_h   = 100
+        top_mid = top_h // 2
+
+        line1_y = top_mid - 16   # "Chúc bạn xem phim vui vẻ" (1 dòng, căn giữa)
+
+        chain += (
+            f",drawbox=x=0:y=0:w={vw}:h={top_h}:color=black:t=fill"
+            f",drawbox=x=0:y={top_h-2}:w={vw}:h=2:color=FFD700@0.6:t=fill"
+    
+            f",drawtext=text='Chúc các bạn xem phim vui vẻ!!!'"
+            f":fontfile='{font_arial}'"
+            f":fontsize=36:fontcolor=FFF8EC@0.95"
+            f":x=(w-text_w)/2:y={line1_y}"
+            f":shadowcolor=black@0.5:shadowx=1:shadowy=1"
+        )
+
+        # ── BOTTOM: Tĩnh Ghiền Drama + YouTube ──
+        bot_h   = 100
+        bot_y   = vh - bot_h
+        bot_mid = bot_y + bot_h // 2
+
+        line2_y = bot_mid - 30   # "Tĩnh Ghiền Drama"
+        line3_y = bot_mid + 8    # "youtube.com/..."
+
+        chain += (
+            f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
+            f",drawbox=x=18:y={bot_y+10}:w=4:h=80:color=FFD700@0.95:t=fill"
+            f",drawbox=x=0:y={bot_y}:w={vw}:h=2:color=FFD700@0.6:t=fill"
+    
+            f",drawtext=text='Tĩnh Ghiền Drama'"
+            f":fontfile='{font_arial}'"
+            f":fontsize=38:fontcolor=FFD700@0.95"
+            f":x=(w-text_w)/2:y={line2_y}"
+            f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
+    
+            f",drawtext=text='you tube . com / @TinhGhienDrama'"
+            f":fontfile='{font_arial}'"
+            f":fontsize=22:fontcolor=FFD700@0.80"
+            f":x=(w-text_w)/2:y={line3_y}"
+            f":shadowcolor=black@0.5:shadowx=1:shadowy=1"
+        )
 
     return chain, params
 

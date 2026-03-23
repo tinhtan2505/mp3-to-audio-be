@@ -49,17 +49,6 @@ IF ERRORLEVEL 1 (
     exit /b
 )
 
-echo.
-echo ============================================================
-echo --- KIEM TRA PHIEN BAN CAC THU VIEN DA CAI ---
-echo ============================================================
-pip show torch torchaudio pyannote.audio whisperx numpy librosa 2>nul | findstr /i "Name: Version:"
-echo ============================================================
-echo.
-echo --- KIEM TRA NHANH TORCH + TORCHAUDIO ---
-python -c "import torch; import torchaudio; print('torch:', torch.__version__); print('torchaudio:', torchaudio.__version__); print('AudioMetaData OK:', hasattr(torchaudio, 'AudioMetaData'))"
-echo.
-
 echo --- KHOI DONG SERVER VITS ---
 echo Server se chay tai: http://localhost:8008
 echo Nhan Ctrl+C de dung server.
