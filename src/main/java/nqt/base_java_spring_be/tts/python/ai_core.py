@@ -52,22 +52,22 @@ def load_ai_models():
     Logger.section(f"BƯỚC 2: TẢI CÁC MODEL AI (CHẾ ĐỘ: WHISPERX)")
 
     # 1. Load WhisperX
-    print(f"\n⏳ Đang tải WhisperX Model: {WHISPER_MODEL_SIZE}...")
-    start = time.time()
-    try:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        compute_type = "float16" if device == "cuda" else "int8"
-
-        print(f"   🎮 Chế độ: {device.upper()} | Compute: {compute_type}")
-        # Khởi tạo WhisperX
-        AI_MODELS["whisper"] = whisperx.load_model(
-            WHISPER_MODEL_SIZE,
-            device,
-            compute_type=compute_type
-        )
-        Logger.success(f"WhisperX đã tải xong", time.time() - start)
-    except Exception as e:
-        Logger.error("Lỗi tải WhisperX", e)
+    # print(f"\n⏳ Đang tải WhisperX Model: {WHISPER_MODEL_SIZE}...")
+    # start = time.time()
+    # try:
+    #     device = "cuda" if torch.cuda.is_available() else "cpu"
+    #     compute_type = "float16" if device == "cuda" else "int8"
+    #
+    #     print(f"   🎮 Chế độ: {device.upper()} | Compute: {compute_type}")
+    #     # Khởi tạo WhisperX
+    #     AI_MODELS["whisper"] = whisperx.load_model(
+    #         WHISPER_MODEL_SIZE,
+    #         device,
+    #         compute_type=compute_type
+    #     )
+    #     Logger.success(f"WhisperX đã tải xong", time.time() - start)
+    # except Exception as e:
+    #     Logger.error("Lỗi tải WhisperX", e)
 
     # 2. Config Gemini - ĐÚNG CHO PHIÊN BẢN 1.60.0
     AI_MODELS["gemini_client"] = None

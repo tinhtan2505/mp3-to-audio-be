@@ -42,12 +42,12 @@ IF ERRORLEVEL 1 (
 )
 
 echo Cai dat/Cap nhat thu vien...
-pip install -r requirements.txt
-IF ERRORLEVEL 1 (
-    echo [LOI] Gap loi khi cai dat thu vien. Kiem tra ket noi mang.
-    pause
-    exit /b
-)
+REM pip install -r requirements.txt
+REM IF ERRORLEVEL 1 (
+REM     echo [LOI] Gap loi khi cai dat thu vien. Kiem tra ket noi mang.
+REM     pause
+REM     exit /b
+REM )
 
 echo --- KHOI DONG SERVER VITS ---
 echo Server se chay tai: http://localhost:8008
