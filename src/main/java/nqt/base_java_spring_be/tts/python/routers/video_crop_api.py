@@ -647,15 +647,20 @@ def api_mix(req: MixRequest):
             current_time, progress = parse_ffmpeg_progress(line, total_duration)
             if progress is not None:
                 elapsed = time.time() - render_start
-                if progress - last_progress_update >= 2 or elapsed - last_progress_update >= 5:
-                    if progress > 0:
-                        eta = (elapsed / progress * 100) - elapsed
-                        print(f"   ⏳ Tiến độ: {progress:5.1f}% | "
-                              f"Thời gian: {elapsed:5.1f}s | ETA: ~{eta:5.1f}s")
-                    else:
-                        print(f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s")
-                    last_progress_update = progress
 
+                # Tính toán nội dung hiển thị
+                if progress > 0:
+                    eta = (elapsed / progress * 100) - elapsed
+                    msg = f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s | ETA: ~{eta:5.1f}s"
+                else:
+                    msg = f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s"
+
+                # \r đưa con trỏ về đầu dòng, end="" để không xuống dòng, flush=True để đẩy dữ liệu ra ngay lập tức
+                print(f"\r{msg}", end="", flush=True)
+
+                last_progress_update = progress
+
+        print()
         process.wait()
         print("="*60 + "\n")
 
