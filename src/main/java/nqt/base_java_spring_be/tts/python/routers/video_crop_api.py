@@ -256,30 +256,49 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
         )
 
         # ── BOTTOM: Tĩnh Ghiền Drama + YouTube ──
-        bot_h   = 100
-        bot_y   = vh - bot_h
-        bot_mid = bot_y + bot_h // 2
+        if vh > 1400:
+            # ── Cấu hình cũ: 1 dòng ──
+            bot_h   = 150
+            bot_y   = vh - bot_h
+            bot_mid = bot_y + bot_h // 2
+            line_y  = bot_mid - 40
 
-        line2_y = bot_mid - 30   # "Tĩnh Ghiền Drama"
-        line3_y = bot_mid + 8    # "youtube.com/..."
+            chain += (
+                f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
+                f",drawbox=x=0:y={bot_y}:w={vw}:h=2:color=FFD700@0.6:t=fill"
+                f",drawtext=text='Tĩnh Ghiền Drama  |  you tube . com / @TinhGhienDrama'"
+                f":fontfile='{font_arial}'"
+                f":fontsize=40:fontcolor=FFD700@0.95"
+                f":x=(w-text_w)/2:y={line_y}"
+                f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
+            )
+        else:
+            # ── Cấu hình mới: 2 dòng ──
+            bot_h   = 120
+            bot_y   = vh - bot_h
+            bot_mid = bot_y + bot_h // 2
 
-        chain += (
-            f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
-            f",drawbox=x=18:y={bot_y+10}:w=4:h=80:color=FFD700@0.95:t=fill"
-            f",drawbox=x=0:y={bot_y}:w={vw}:h=2:color=FFD700@0.6:t=fill"
+            line1_bot_y = bot_mid - 48   # dòng 1: "Tĩnh Ghiền Drama"
+            line2_bot_y = bot_mid - 4    # dòng 2: "youtube.com/@TinhGhienDrama"
 
-            f",drawtext=text='Tĩnh Ghiền Drama'"
-            f":fontfile='{font_arial}'"
-            f":fontsize=38:fontcolor=FFD700@0.95"
-            f":x=(w-text_w)/2:y={line2_y}"
-            f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
-
-            f",drawtext=text='you tube . com / @TinhGhienDrama'"
-            f":fontfile='{font_arial}'"
-            f":fontsize=22:fontcolor=FFD700@0.80"
-            f":x=(w-text_w)/2:y={line3_y}"
-            f":shadowcolor=black@0.5:shadowx=1:shadowy=1"
-        )
+            chain += (
+                f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
+                f",drawbox=x=0:y={bot_y}:w={vw}:h=2:color=FFD700@0.6:t=fill"
+    
+                # Dòng 1
+                f",drawtext=text='Tĩnh Ghiền Drama'"
+                f":fontfile='{font_arial}'"
+                f":fontsize=40:fontcolor=FFD700@0.95"
+                f":x=(w-text_w)/2:y={line1_bot_y}"
+                f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
+    
+                # Dòng 2
+                f",drawtext=text='you tube . com / @TinhGhienDrama'"
+                f":fontfile='{font_arial}'"
+                f":fontsize=30:fontcolor=FFD700@0.85"
+                f":x=(w-text_w)/2:y={line2_bot_y}"
+                f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
+            )
 
         # ── BORDER VÀNG bao quanh toàn bộ video ──
         border_thickness = 5  # px, có thể chỉnh
