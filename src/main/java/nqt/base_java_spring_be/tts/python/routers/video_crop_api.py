@@ -72,10 +72,26 @@ def build_comet_filter(vw: int, vh: int, bot_y: int, bot_h: int,
         size = max(4, int(head_size * (1 - progress**1.2)))
 
         if i == 0:
+            # Lớp 1: Hào quang ngoài cùng (Outer Glow) - Tỏa rộng, mờ ảo và nhấp nháy nhẹ
+            glow_size_1 = int(size * 1.8)
+            chain += (
+                f",drawtext=text='●':fontfile='{font_arial}':fontsize={glow_size_1}"
+                f":fontcolor=FFFFFF:alpha='0.15+0.05*sin(t*10)':x='({cx_expr})-tw/2':y='({cy_expr})-th/2'"
+            )
+
+            # Lớp 2: Hào quang giữa (Inner Glow) - Ôm sát lõi, sáng hơn, màu vàng chanh nhạt
+            glow_size_2 = int(size * 1.3)
+            chain += (
+                f",drawtext=text='●':fontfile='{font_arial}':fontsize={glow_size_2}"
+                f":fontcolor=FFFF99:alpha='0.4+0.1*sin(t*10)':x='({cx_expr})-tw/2':y='({cy_expr})-th/2'"
+            )
+
+            # Lớp 3: Lõi sao chổi (Core) - Trắng buốt, sắc nét (Sẽ được add tự động ở cuối vòng lặp)
             char = "●"
             color = "FFFFFF"
-            alpha_expr = "0.85+0.15*sin(t*10)"
-            shadow = f":shadowcolor=FFFFFF@0.9:shadowx=0:shadowy=0"
+            alpha_expr = "0.95+0.05*sin(t*15)"
+            # Thêm viền nhẹ để tăng độ rực sáng cho lõi
+            shadow = f":borderw=2:bordercolor=FFFFFF@0.8:shadowcolor=FFFFCC@0.5:shadowx=0:shadowy=0"
         else:
             char = "●"
             # Sử dụng mảng màu Neon mới
