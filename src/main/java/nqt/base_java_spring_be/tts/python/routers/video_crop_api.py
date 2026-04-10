@@ -613,8 +613,6 @@ def api_mix(req: MixRequest):
         print(f"\n   ⚙️  ENCODE PARAMS: CRF={crf_value} | Preset={preset_choice}")
         print(f"   🔊 AUDIO OUTPUT: 44100Hz | Stereo | 192kbps  ← FIX v2.1")
         print("   ⏳ Đang render FFmpeg...")
-        print(f"   🔧 Filter: {filter_complex}")
-
         print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
         print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
         if has_music:
