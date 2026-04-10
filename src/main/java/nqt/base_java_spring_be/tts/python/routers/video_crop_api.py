@@ -18,45 +18,75 @@ else:
 
 def build_comet_filter(vw: int, vh: int, bot_y: int, bot_h: int,
                        speed_period: float = 10.0,
-                       tail_length: int = 25,
-                       gap: int = 12) -> str:
+                       tail_length: int = 55,
+                       gap: int = 4) -> str:
     font_arial = "C\\:/Windows/Fonts/arial.ttf"
-    base_fontsize = 18
 
-    L1 = vw
-    L2 = vw + bot_h
-    L3 = 2 * vw + bot_h
-    TotalL = 2 * (vw + bot_h)
+    # Kích thước chuẩn cho phần đầu to nhất
+    head_size = 36
+    m = head_size // 2
 
-    def get_seg_expr(d_val):
-        x = (f"if(lt({d_val},{L1}), {d_val}, "
-             f"if(lt({d_val},{L2}), {vw}-tw, "
-             f"if(lt({d_val},{L3}), {vw}-({d_val}-{L2})-tw, 0)))")
-        y = (f"if(lt({d_val},{L1}), {bot_y}, "
-             f"if(lt({d_val},{L2}), {bot_y}+({d_val}-{L1}), "
-             f"if(lt({d_val},{L3}), {vh}-th, "
-             f"{vh}-({d_val}-{L3})-th)))")
-        return x, y
+    path_w = vw - 2 * m
+    path_h = bot_h - 2 * m
+
+    L1 = path_w
+    L2 = path_w + path_h
+    L3 = 2 * path_w + path_h
+    TotalL = 2 * (path_w + path_h)
+
+    def get_center_expr(d_val):
+        cx = (f"if(lt({d_val},{L1}), {m}+{d_val}, "
+              f"if(lt({d_val},{L2}), {vw}-{m}, "
+              f"if(lt({d_val},{L3}), {vw}-{m}-({d_val}-{L2}), "
+              f"{m})))")
+
+        cy = (f"if(lt({d_val},{L1}), {bot_y}+{m}, "
+              f"if(lt({d_val},{L2}), {bot_y}+{m}+({d_val}-{L1}), "
+              f"if(lt({d_val},{L3}), {vh}-{m}, "
+              f"{vh}-{m}-({d_val}-{L3}))))")
+
+        return cx, cy
 
     chain = ""
+
+    # 🌈 BỘ MÀU NEON TỐI ƯU CHO NỀN ĐEN 🌈
+    neon_colors = [
+        "FF1493",  # Hồng Neon (Deep Pink)
+        "FF3333",  # Đỏ rực (Bright Red)
+        "FF9900",  # Cam sáng (Neon Orange)
+        "FFFF00",  # Vàng chanh (Bright Yellow)
+        "00FF00",  # Xanh lá mạ (Lime Green)
+        "00FFFF",  # Xanh lơ (Cyan/Aqua)
+        "3399FF"   # Xanh da trời sáng (Light Blue)
+    ]
+
     for i in range(tail_length + 1):
         current_gap = i * gap
-        # mod TotalL giúp đuôi không bị mất khi đầu đã sang vòng mới
         d_expr = f"mod(mod(t\\,{speed_period})/{speed_period}*{TotalL}-{current_gap}\\,{TotalL})"
-        expr_x, expr_y = get_seg_expr(d_expr)
+        cx_expr, cy_expr = get_center_expr(d_expr)
+
+        expr_x = f"({cx_expr})-tw/2"
+        expr_y = f"({cy_expr})-th/2"
+
+        progress = i / tail_length
+        size = max(4, int(head_size * (1 - progress**1.2)))
 
         if i == 0:
-            color = "FFFFFF@0.95" # Đầu trắng
-            size = base_fontsize
+            char = "●"
+            color = "FFFFFF"
+            alpha_expr = "0.85+0.15*sin(t*10)"
+            shadow = f":shadowcolor=FFFFFF@0.9:shadowx=0:shadowy=0"
         else:
-            # Opacity giảm dần theo tỉ lệ đuôi (mượt hơn công thức cũ)
-            opacity = max(0.05, 0.8 * (1 - (i / tail_length)))
-            color = f"FF4422@{opacity:.2f}"
-            size = max(8, base_fontsize - (i * 0.5)) # Thu nhỏ dần nhưng không quá bé
+            char = "●"
+            # Sử dụng mảng màu Neon mới
+            color = neon_colors[i % 7]
+            base_opacity = max(0.0, 0.9 * (1 - progress**1.5))
+            alpha_expr = f"{base_opacity}*(0.7+0.3*sin(t*15+{i}))"
+            shadow = ""
 
         chain += (
-            f",drawtext=text='█':fontfile='{font_arial}':fontsize={size}"
-            f":fontcolor={color}:x='{expr_x}':y='{expr_y}'"
+            f",drawtext=text='{char}':fontfile='{font_arial}':fontsize={size}"
+            f":fontcolor={color}:alpha='{alpha_expr}':x='{expr_x}':y='{expr_y}'{shadow}"
         )
 
     return chain
@@ -310,8 +340,8 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
             bot_y   = vh - bot_h
             bot_mid = bot_y + bot_h // 2
 
-            line1_bot_y = bot_mid - 48   # dòng 1: "Tĩnh Ghiền Drama"
-            line2_bot_y = bot_mid - 4    # dòng 2: "youtube.com/@TinhGhienDrama"
+            line1_bot_y = bot_mid - 36   # dòng 1: "Tĩnh Ghiền Drama"
+            line2_bot_y = bot_mid + 8    # dòng 2: "youtube.com/@TinhGhienDrama"
 
             chain += (
                 f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
@@ -320,7 +350,7 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
                 # Dòng 1
                 f",drawtext=text='Tĩnh Ghiền Drama'"
                 f":fontfile='{font_arial}'"
-                f":fontsize=40:fontcolor=FFD700@0.95"
+                f":fontsize=34:fontcolor=FFD700@0.95"
                 f":x=(w-text_w)/2:y={line1_bot_y}"
                 f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
     
