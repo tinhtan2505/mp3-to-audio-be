@@ -3,16 +3,19 @@ import os
 import time
 import re
 import torch
+from config import (
+    GEMINI_MODEL
+)
 
 _original_torch_load = torch.load
 
 def _patched_torch_load(f, map_location=None, pickle_module=None, weights_only=None, **kwargs):
     return _original_torch_load(f, map_location=map_location, weights_only=False, **kwargs)
 
-torch.load = _patched_torch_load
-print("   ✅ [Torch Fix] Đã patch torch.load -> weights_only=False")
+# torch.load = _patched_torch_load
+# print("   ✅ [Torch Fix] Đã patch torch.load -> weights_only=False")
 
-import whisperx
+# import whisperx
 from google import genai
 from google.genai.types import GenerateContentConfig, GoogleSearch
 from openai import OpenAI
@@ -124,7 +127,7 @@ def call_gemini_api(text_list):
             time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model=GEMINI_MODEL,
                 contents=prompt_content,
                 config=GenerateContentConfig(
                     temperature=0.1,
@@ -307,7 +310,7 @@ def call_gemini_fix_lines(failed_map):
                 time.sleep(2)
 
                 res = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model=GEMINI_MODEL,
                     contents=prompt,
                     config=GenerateContentConfig(temperature=0.1)
                 )

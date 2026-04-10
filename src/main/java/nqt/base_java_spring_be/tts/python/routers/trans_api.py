@@ -10,7 +10,7 @@ from google import genai
 from ai_core import AI_MODELS
 from config import (
     TRANS_BATCH_SIZE, TRANS_DELAY_SECONDS_GEMINI,
-    SYSTEM_INSTRUCTION_TRANS_GEMINI, GEMINI_API_KEYS
+    SYSTEM_INSTRUCTION_TRANS_GEMINI, GEMINI_API_KEYS, GEMINI_MODEL
 )
 from utils import Logger
 
@@ -123,7 +123,7 @@ def call_gemini_api(text_list, max_retries=3):
             time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
             response = current_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model=GEMINI_MODEL,
                 contents=prompt_content,
                 config=GenerateContentConfig(
                     temperature=0.1,

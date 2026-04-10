@@ -13,13 +13,13 @@ from fastapi import APIRouter, HTTPException
 from schemas import WhisperRequest
 from google.genai.types import GenerateContentConfig
 from google import genai
-import whisperx
+# import whisperx
 
 from ai_core import AI_MODELS
 from config import (
     WHISPER_BACKEND, MAX_SEGMENTS_PER_FILE, TRANS_BATCH_SIZE,
     TRANS_DELAY_SECONDS_GEMINI, SYSTEM_INSTRUCTION_TRANS_GEMINI,
-    GEMINI_API_KEYS, VOICE_MALE, VOICE_FEMALE, SAMPLE_RATE
+    GEMINI_API_KEYS, VOICE_MALE, VOICE_FEMALE, SAMPLE_RATE, GEMINI_MODEL
 )
 from utils import Logger, get_timestamp_str, normalize_segment_time, generate_tts
 
@@ -195,7 +195,7 @@ def call_gemini_api(text_list, max_retries=3):
             time.sleep(TRANS_DELAY_SECONDS_GEMINI)
 
             response = current_client.models.generate_content(
-                model='gemini-2.5-flash',
+                model=GEMINI_MODEL,
                 contents=prompt_content,
                 config=GenerateContentConfig(
                     temperature=0.1,
