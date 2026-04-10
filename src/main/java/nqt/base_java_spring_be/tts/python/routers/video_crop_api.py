@@ -16,18 +16,50 @@ if DEFAULT_YOUTUBE == "tinh":
 else:
     DEFAULT_BRAND_TEXT = "Thúy Lụa Drama Review"
 
-# ============================================================
-# CHỐNG BẢN QUYỀN - MODULE NÂNG CAO (v2.0)
-# Theo checklist: Remake 40%+ | Đổi màu | Đổi nhạc | Xóa logo
-# Thêm: Crop/flip nhẹ | Speed variation | Audio fingerprint bypass
-# ============================================================
+def build_comet_filter(vw: int, vh: int, bot_y: int, bot_h: int,
+                       speed_period: float = 10.0,
+                       tail_length: int = 25,
+                       gap: int = 12) -> str:
+    font_arial = "C\\:/Windows/Fonts/arial.ttf"
+    base_fontsize = 18
 
+    L1 = vw
+    L2 = vw + bot_h
+    L3 = 2 * vw + bot_h
+    TotalL = 2 * (vw + bot_h)
 
-# ============================================================
-# VIETSUB - TÁCH CÂU DÀI (v2.0)
-# Tự động chia câu dài thành nhiều dòng ngắn,
-# phân bổ thời gian theo tỉ lệ độ dài ký tự từng câu.
-# ============================================================
+    def get_seg_expr(d_val):
+        x = (f"if(lt({d_val},{L1}), {d_val}, "
+             f"if(lt({d_val},{L2}), {vw}-tw, "
+             f"if(lt({d_val},{L3}), {vw}-({d_val}-{L2})-tw, 0)))")
+        y = (f"if(lt({d_val},{L1}), {bot_y}, "
+             f"if(lt({d_val},{L2}), {bot_y}+({d_val}-{L1}), "
+             f"if(lt({d_val},{L3}), {vh}-th, "
+             f"{vh}-({d_val}-{L3})-th)))")
+        return x, y
+
+    chain = ""
+    for i in range(tail_length + 1):
+        current_gap = i * gap
+        # mod TotalL giúp đuôi không bị mất khi đầu đã sang vòng mới
+        d_expr = f"mod(mod(t\\,{speed_period})/{speed_period}*{TotalL}-{current_gap}\\,{TotalL})"
+        expr_x, expr_y = get_seg_expr(d_expr)
+
+        if i == 0:
+            color = "FFFFFF@0.95" # Đầu trắng
+            size = base_fontsize
+        else:
+            # Opacity giảm dần theo tỉ lệ đuôi (mượt hơn công thức cũ)
+            opacity = max(0.05, 0.8 * (1 - (i / tail_length)))
+            color = f"FF4422@{opacity:.2f}"
+            size = max(8, base_fontsize - (i * 0.5)) # Thu nhỏ dần nhưng không quá bé
+
+        chain += (
+            f",drawtext=text='█':fontfile='{font_arial}':fontsize={size}"
+            f":fontcolor={color}:x='{expr_x}':y='{expr_y}'"
+        )
+
+    return chain
 
 def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
     # Bước 1: tách theo \\N thủ công
@@ -299,6 +331,17 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
                 f":x=(w-text_w)/2:y={line2_bot_y}"
                 f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
             )
+
+        print(f"   💫 Cấu hình COMET: Tốc độ chậm, Đuôi siêu dài...")
+        chain += build_comet_filter(
+            vw=vw,
+            vh=vh,
+            bot_y=bot_y,
+            bot_h=bot_h,
+            speed_period=10.0,  # CHỈNH TỐC ĐỘ TẠI ĐÂY (Số càng lớn càng chậm)
+            tail_length=25,     # CHỈNH ĐỘ DÀI ĐUÔI TẠI ĐÂY (Số đốt đuôi)
+            gap=12              # CHỈNH ĐỘ DÀY CỦA ĐUÔI (Khoảng cách các đốt)
+        )
 
         # ── BORDER VÀNG bao quanh toàn bộ video ──
         border_thickness = 5  # px, có thể chỉnh
