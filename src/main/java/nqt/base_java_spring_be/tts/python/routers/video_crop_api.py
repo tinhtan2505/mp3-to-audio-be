@@ -378,16 +378,15 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
                 f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
             )
 
-        print(f"   💫 Cấu hình COMET: Tốc độ chậm, Đuôi siêu dài...")
-        chain += build_comet_filter(
-            vw=vw,
-            vh=vh,
-            bot_y=bot_y,
-            bot_h=bot_h,
-            speed_period=10.0,  # CHỈNH TỐC ĐỘ TẠI ĐÂY (Số càng lớn càng chậm)
-            tail_length=25,     # CHỈNH ĐỘ DÀI ĐUÔI TẠI ĐÂY (Số đốt đuôi)
-            gap=12              # CHỈNH ĐỘ DÀY CỦA ĐUÔI (Khoảng cách các đốt)
-        )
+        # chain += build_comet_filter(
+        #     vw=vw,
+        #     vh=vh,
+        #     bot_y=bot_y,
+        #     bot_h=bot_h,
+        #     speed_period=10.0,  # CHỈNH TỐC ĐỘ TẠI ĐÂY (Số càng lớn càng chậm)
+        #     tail_length=25,     # CHỈNH ĐỘ DÀI ĐUÔI TẠI ĐÂY (Số đốt đuôi)
+        #     gap=12              # CHỈNH ĐỘ DÀY CỦA ĐUÔI (Khoảng cách các đốt)
+        # )
 
         # ── BORDER VÀNG bao quanh toàn bộ video ──
         border_thickness = 5  # px, có thể chỉnh
@@ -713,8 +712,8 @@ def api_mix(req: MixRequest):
 
         filter_complex = ";".join(filters)
 
-        crf_value = random.choice([22, 23, 24])
-        preset_choice = random.choice(["medium", "slow"])
+        crf_value = random.choice([23])
+        preset_choice = random.choice(["fast"])
 
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1"] + inputs + [
             "-filter_complex", filter_complex,
