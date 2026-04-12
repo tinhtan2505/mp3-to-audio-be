@@ -494,10 +494,7 @@ def api_mix(req: MixRequest):
                     f":shadowcolor=black@0.3:shadowx=2:shadowy=2"
                 )
 
-            if DEFAULT_YOUTUBE == "tinh":
-                brand_img_path = "D:/Dubbing/logo_tinh.png"
-            else:
-                brand_img_path = "D:/Dubbing/logo_lua.png"
+            brand_img_path = "D:/Dubbing/logo_tinh.png"
 
             has_branding = brand_img_path and os.path.exists(brand_img_path)
 
@@ -514,12 +511,8 @@ def api_mix(req: MixRequest):
                     inputs.extend(["-i", voice, "-i", brand_img_path])
                     brand_idx = 2
 
-                if DEFAULT_YOUTUBE == "tinh":
-                    filters.append(f"[{brand_idx}:v]scale=120:120[v_brand]")
-                    filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
-                else:
-                    filters.append(f"[{brand_idx}:v]scale=225:150[v_brand]")
-                    filters.append(f"[v_delogo][v_brand]overlay=x=0:y=0[v_out]")
+                filters.append(f"[{brand_idx}:v]scale=120:120[v_brand]")
+                filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
 
                 video_map = "[v_out]"
             else:
