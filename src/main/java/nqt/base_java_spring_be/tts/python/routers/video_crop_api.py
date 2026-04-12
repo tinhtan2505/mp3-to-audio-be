@@ -9,106 +9,9 @@ from schemas import MixRequest
 from config import DEFAULT_MUSIC_VOLUME
 from utils import Logger, get_timestamp_str
 
-DEFAULT_YOUTUBE = "tinh"
-
-if DEFAULT_YOUTUBE == "tinh":
-    DEFAULT_BRAND_TEXT = "Tĩnh Ghiền Drama"
-else:
-    DEFAULT_BRAND_TEXT = "Thúy Lụa Drama Review"
-
-def build_comet_filter(vw: int, vh: int, bot_y: int, bot_h: int,
-                       speed_period: float = 10.0,
-                       tail_length: int = 55,
-                       gap: int = 4) -> str:
-    font_arial = "C\\:/Windows/Fonts/arial.ttf"
-
-    # Kích thước chuẩn cho phần đầu to nhất
-    head_size = 36
-    m = head_size // 2
-
-    path_w = vw - 2 * m
-    path_h = bot_h - 2 * m
-
-    L1 = path_w
-    L2 = path_w + path_h
-    L3 = 2 * path_w + path_h
-    TotalL = 2 * (path_w + path_h)
-
-    def get_center_expr(d_val):
-        cx = (f"if(lt({d_val},{L1}), {m}+{d_val}, "
-              f"if(lt({d_val},{L2}), {vw}-{m}, "
-              f"if(lt({d_val},{L3}), {vw}-{m}-({d_val}-{L2}), "
-              f"{m})))")
-
-        cy = (f"if(lt({d_val},{L1}), {bot_y}+{m}, "
-              f"if(lt({d_val},{L2}), {bot_y}+{m}+({d_val}-{L1}), "
-              f"if(lt({d_val},{L3}), {vh}-{m}, "
-              f"{vh}-{m}-({d_val}-{L3}))))")
-
-        return cx, cy
-
-    chain = ""
-
-    # 🌈 BỘ MÀU NEON TỐI ƯU CHO NỀN ĐEN 🌈
-    neon_colors = [
-        "FF1493",  # Hồng Neon (Deep Pink)
-        "FF3333",  # Đỏ rực (Bright Red)
-        "FF9900",  # Cam sáng (Neon Orange)
-        "FFFF00",  # Vàng chanh (Bright Yellow)
-        "00FF00",  # Xanh lá mạ (Lime Green)
-        "00FFFF",  # Xanh lơ (Cyan/Aqua)
-        "3399FF"   # Xanh da trời sáng (Light Blue)
-    ]
-
-    for i in range(tail_length + 1):
-        current_gap = i * gap
-        d_expr = f"mod(mod(t\\,{speed_period})/{speed_period}*{TotalL}-{current_gap}\\,{TotalL})"
-        cx_expr, cy_expr = get_center_expr(d_expr)
-
-        expr_x = f"({cx_expr})-tw/2"
-        expr_y = f"({cy_expr})-th/2"
-
-        progress = i / tail_length
-        size = max(4, int(head_size * (1 - progress**1.2)))
-
-        if i == 0:
-            # Lớp 1: Hào quang ngoài cùng (Outer Glow) - Tỏa rộng, mờ ảo và nhấp nháy nhẹ
-            glow_size_1 = int(size * 1.8)
-            chain += (
-                f",drawtext=text='●':fontfile='{font_arial}':fontsize={glow_size_1}"
-                f":fontcolor=FFFFFF:alpha='0.15+0.05*sin(t*10)':x='({cx_expr})-tw/2':y='({cy_expr})-th/2'"
-            )
-
-            # Lớp 2: Hào quang giữa (Inner Glow) - Ôm sát lõi, sáng hơn, màu vàng chanh nhạt
-            glow_size_2 = int(size * 1.3)
-            chain += (
-                f",drawtext=text='●':fontfile='{font_arial}':fontsize={glow_size_2}"
-                f":fontcolor=FFFF99:alpha='0.4+0.1*sin(t*10)':x='({cx_expr})-tw/2':y='({cy_expr})-th/2'"
-            )
-
-            # Lớp 3: Lõi sao chổi (Core) - Trắng buốt, sắc nét (Sẽ được add tự động ở cuối vòng lặp)
-            char = "●"
-            color = "FFFFFF"
-            alpha_expr = "0.95+0.05*sin(t*15)"
-            # Thêm viền nhẹ để tăng độ rực sáng cho lõi
-            shadow = f":borderw=2:bordercolor=FFFFFF@0.8:shadowcolor=FFFFCC@0.5:shadowx=0:shadowy=0"
-        else:
-            char = "●"
-            # Sử dụng mảng màu Neon mới
-            color = neon_colors[i % 7]
-            base_opacity = max(0.0, 0.9 * (1 - progress**1.5))
-            alpha_expr = f"{base_opacity}*(0.7+0.3*sin(t*15+{i}))"
-            shadow = ""
-
-        chain += (
-            f",drawtext=text='{char}':fontfile='{font_arial}':fontsize={size}"
-            f":fontcolor={color}:alpha='{alpha_expr}':x='{expr_x}':y='{expr_y}'{shadow}"
-        )
-
-    return chain
+DEFAULT_BRAND_TEXT = "Tĩnh Ghiền Drama"
 
 def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
-    # Bước 1: tách theo \\N thủ công
     parts = re.split(r'\\N', text)
     result = []
 
@@ -117,7 +20,6 @@ def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
         if not part:
             continue
 
-        # Bước 2: tách theo dấu câu kết thúc: . ! ? … (giữ dấu câu lại)
         sub_parts = re.split(r'(?<=[.!?…])\s+', part)
 
         for sub in sub_parts:
@@ -126,7 +28,6 @@ def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
                 continue
 
             if len(sub) > max_chars:
-                # Bước 3: tách theo ; : , (giữ dấu câu lại)
                 comma_parts = re.split(r'(?<=[;:,])\s+', sub)
                 for cp in comma_parts:
                     cp = cp.strip()
@@ -268,6 +169,10 @@ def escape_srt_path(path: str) -> str:
     return path
 
 
+# ============================================================
+# CHỐNG BẢN QUYỀN - VIDEO CHAIN
+# ============================================================
+
 def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_height: int) -> tuple[str, dict]:
     params = {}
 
@@ -316,16 +221,13 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
         vw = video_width
         vh = video_height
 
-        # ── TOP: Chúc bạn xem phim vui vẻ ──
         top_h   = 100
         top_mid = top_h // 2
-
-        line1_y = top_mid - 16   # "Chúc bạn xem phim vui vẻ" (1 dòng, căn giữa)
+        line1_y = top_mid - 16
 
         chain += (
             f",drawbox=x=0:y=0:w={vw}:h={top_h}:color=black:t=fill"
             f",drawbox=x=0:y={top_h-2}:w={vw}:h=2:color=FFD700@0.6:t=fill"
-
             f",drawtext=text='Chúc các bạn xem phim vui vẻ!!!'"
             f":fontfile='{font_arial}'"
             f":fontsize=36:fontcolor=FFF8EC@0.95"
@@ -378,56 +280,31 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
                 f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
             )
 
-        # chain += build_comet_filter(
-        #     vw=vw,
-        #     vh=vh,
-        #     bot_y=bot_y,
-        #     bot_h=bot_h,
-        #     speed_period=10.0,  # CHỈNH TỐC ĐỘ TẠI ĐÂY (Số càng lớn càng chậm)
-        #     tail_length=25,     # CHỈNH ĐỘ DÀI ĐUÔI TẠI ĐÂY (Số đốt đuôi)
-        #     gap=12              # CHỈNH ĐỘ DÀY CỦA ĐUÔI (Khoảng cách các đốt)
-        # )
-
-        # ── BORDER VÀNG bao quanh toàn bộ video ──
-        border_thickness = 5  # px, có thể chỉnh
-        border_color = "FFD700@0.95"
-
-        chain += (
-            f",drawbox=x=0:y=0:w=iw:h={border_thickness}:color={border_color}:t=fill"
-            f",drawbox=x=0:y=0:w={border_thickness}:h=ih:color={border_color}:t=fill"
-            f",drawbox=x=iw-{border_thickness}:y=0:w={border_thickness}:h=ih:color={border_color}:t=fill"
-            f",drawbox=x=0:y=ih-{border_thickness}:w=iw:h=ih:color={border_color}:t=fill"
-        )
-
     return chain, params
 
 
+# ============================================================
+# CHỐNG BẢN QUYỀN - AUDIO (FIX: aresample + aformat)
+# ============================================================
+
 def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[str, dict]:
     """
-    ============================================================
     XỬ LÝ AUDIO GỐC TIẾNG TRUNG (lồng tiếng phim)
 
     ⚠️  QUY TẮC SYNC BẮT BUỘC:
-    - `inst` ở đây là audio tiếng Trung gốc của phim (dialogue).
     - TUYỆT ĐỐI KHÔNG dùng atempo / asetrate / pitch shift.
-    - Bất kỳ thay đổi tempo/pitch nào đều làm lệch thời gian
-      → tiếng Trung và khẩu hình miệng diễn viên MẤT SYNC.
+    - Chỉ dùng filter KHÔNG ảnh hưởng timing.
 
-    Chỉ được phép áp dụng các filter KHÔNG ảnh hưởng timing:
-    1. highpass / lowpass  - cắt tần số, timing không đổi
-    2. volume              - điều chỉnh âm lượng, timing không đổi
-    ============================================================
-    Returns: (filter_string, params_dict)
+    FIX: Thêm aresample=44100 + aformat=stereo
+    - Đảm bảo output luôn 44100Hz stereo
+    - Tránh amix lấy sample rate thấp nhất
     """
     params = {}
 
-    # EQ nhẹ — KHÔNG thay đổi tempo hay pitch
     music_highpass = random.randint(60, 90)
     music_lowpass  = random.randint(16000, 18000)
-
-    # Ghi rõ None để caller biết không có transform
-    music_pitch = None
-    music_tempo = None
+    music_pitch    = None
+    music_tempo    = None
 
     params["music_pitch"]    = music_pitch
     params["music_tempo"]    = music_tempo
@@ -437,14 +314,18 @@ def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[
     print(f"   🎵 AUDIO TIẾNG TRUNG (giữ sync khẩu hình):")
     print(f"      • Pitch Shift : BỎ QUA ← thay đổi sẽ gây lệch sync!")
     print(f"      • Tempo       : BỎ QUA ← thay đổi sẽ gây lệch sync!")
+    print(f"      • Resample    : 44100 Hz (FIX: giữ chất lượng audio)")
+    print(f"      • Format      : stereo (FIX: tránh output mono)")
     print(f"      • High-pass   : {music_highpass} Hz")
     print(f"      • Low-pass    : {music_lowpass} Hz")
     print(f"      • Volume      : {m_vol}")
     print(f"   ✅ Timing 100% giữ nguyên → tiếng Trung khớp khẩu hình diễn viên")
 
-    # Chỉ EQ + volume — không có atempo / asetrate
+    # FIX: aresample + aformat TRƯỚC các filter khác
     chain = (
         f"{music_input_label}"
+        f"aresample=44100,"
+        f"aformat=channel_layouts=stereo,"
         f"highpass=f={music_highpass},"
         f"lowpass=f={music_lowpass},"
         f"volume={m_vol}[bg]"
@@ -457,7 +338,7 @@ def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[
 @router.post("/api/v1/dubbing/crop-video")
 def api_mix(req: MixRequest):
     start_time = time.time()
-    Logger.section("GHÉP VIDEO (FFMPEG) - CHỐNG BẢN QUYỀN v2.0")
+    Logger.section("GHÉP VIDEO (FFMPEG) - CHỐNG BẢN QUYỀN v2.1")
 
     extracted_audio_temp = None
     ass_temp_path = None
@@ -673,16 +554,18 @@ def api_mix(req: MixRequest):
             voice_idx = 2
             music_idx = 1
 
-            # Voice tiếng Việt: boost volume + bass
+            # FIX: aresample=44100 + aformat=stereo TRƯỚC volume
+            # Đảm bảo output luôn 44100Hz stereo dù TTS source là 16kHz mono
             voice_final = (
                 f"[{voice_idx}:a]"
+                f"aresample=44100,"
+                f"aformat=channel_layouts=stereo,"
                 f"volume={req.voice_volume or 3.0},"
                 f"lowshelf=g=5:f=100:w=0.5[voice]"
             )
             filters.append(voice_final)
             filters.append(f"[voice]asplit[v_trig][v_mix]")
 
-            # Audio tiếng Trung: CHỈ EQ + volume, KHÔNG pitch/tempo
             music_filter, music_params = build_music_copyright_bypass(
                 f"[{music_idx}:a]", m_vol
             )
@@ -698,13 +581,16 @@ def api_mix(req: MixRequest):
         else:
             print(f"   🎚️  Chế độ: VOICE ONLY")
             voice_idx = 1
-            music_pitch = None
+            music_pitch    = None
             music_highpass = None
-            music_lowpass = None
-            music_tempo = None
+            music_lowpass  = None
+            music_tempo    = None
 
+            # FIX: aresample=44100 + aformat=stereo TRƯỚC volume
             voice_final = (
                 f"[{voice_idx}:a]"
+                f"aresample=44100,"
+                f"aformat=channel_layouts=stereo,"
                 f"volume={req.voice_volume or 3.0},"
                 f"lowshelf=g=5:f=100:w=0.5[a_out]"
             )
@@ -712,8 +598,8 @@ def api_mix(req: MixRequest):
 
         filter_complex = ";".join(filters)
 
-        crf_value = random.choice([23])
-        preset_choice = random.choice(["fast"])
+        crf_value = 23
+        preset_choice = "fast"
 
         cmd = ["ffmpeg", "-y", "-progress", "pipe:1"] + inputs + [
             "-filter_complex", filter_complex,
@@ -721,11 +607,13 @@ def api_mix(req: MixRequest):
             "-c:v", "libx264", "-preset", preset_choice, "-crf", str(crf_value),
             "-metadata", f"comment=Processed_{get_timestamp_str()}",
             "-metadata", "encoder=CustomEncoder",
-            "-c:a", "aac", "-b:a", "192k",
+            # FIX: explicit -ar và -ac đảm bảo audio output đúng thông số
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
             out_file
         ]
 
         print(f"\n   ⚙️  ENCODE PARAMS: CRF={crf_value} | Preset={preset_choice}")
+        print(f"   🔊 AUDIO OUTPUT: 44100Hz | Stereo | 192kbps")
         print("   ⏳ Đang render FFmpeg...")
         print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
         print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
@@ -759,15 +647,14 @@ def api_mix(req: MixRequest):
             current_time, progress = parse_ffmpeg_progress(line, total_duration)
             if progress is not None:
                 elapsed = time.time() - render_start
+
                 if progress > 0:
                     eta = (elapsed / progress * 100) - elapsed
                     msg = f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s | ETA: ~{eta:5.1f}s"
                 else:
                     msg = f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s"
 
-                # \r đưa con trỏ về đầu dòng, end="" để không xuống dòng, flush=True để đẩy dữ liệu ra ngay lập tức
                 print(f"\r{msg}", end="", flush=True)
-
                 last_progress_update = progress
 
         print()
@@ -820,10 +707,15 @@ def api_mix(req: MixRequest):
                     "music_tempo": music_tempo,
                     "music_highpass": music_highpass,
                     "music_lowpass": music_lowpass,
+                    "resample": "44100Hz",
+                    "channels": "stereo",
                 } if has_music else None,
                 "encode": {
                     "crf": crf_value,
                     "preset": preset_choice,
+                    "audio_bitrate": "192k",
+                    "audio_samplerate": "44100",
+                    "audio_channels": "2 (stereo)",
                 }
             },
             "render_time": f"{render_time:.2f}s",
