@@ -11,22 +11,119 @@ from utils import Logger, get_timestamp_str
 
 DEFAULT_BRAND_TEXT = "Tĩnh Ghiền Drama"
 
+# ============================================================
+# INTEL QSV - PHÁT HIỆN VÀ CẤU HÌNH GPU
+# ============================================================
+
+def detect_intel_qsv() -> dict:
+    """
+    Kiểm tra FFmpeg có hỗ trợ Intel QSV không.
+    Trả về dict chứa encoder/decoder tối ưu.
+    """
+    result = {
+        "available": False,
+        "encoder": "libx264",          # fallback CPU
+        "decoder_flags": [],           # hw decode flags
+        "hwaccel": None,
+        "hwaccel_device": None,
+        "extra_input_flags": [],
+        "vpp_available": False,        # Intel VPP (video post-processing)
+    }
+
+    try:
+        # Kiểm tra h264_qsv encoder
+        probe = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True
+        )
+        if "h264_qsv" in probe.stdout:
+            result["available"] = True
+            result["encoder"] = "h264_qsv"
+            result["hwaccel"] = "qsv"
+            result["extra_input_flags"] = [
+                "-hwaccel", "qsv",
+                "-hwaccel_output_format", "qsv",
+            ]
+            print("   ✅ Intel QSV: h264_qsv PHÁT HIỆN THÀNH CÔNG")
+        else:
+            print("   ⚠️  h264_qsv không tìm thấy → dùng libx264 (CPU)")
+
+        # Kiểm tra vpp_qsv (hardware video processing)
+        if "vpp_qsv" in probe.stdout or "scale_qsv" in probe.stdout:
+            result["vpp_available"] = True
+            print("   ✅ Intel VPP QSV: Có thể dùng hardware filter")
+
+    except Exception as e:
+        print(f"   ⚠️  Lỗi khi detect QSV: {e}")
+
+    return result
+
+
+# Cache kết quả detect để không gọi lại nhiều lần
+_QSV_INFO: dict | None = None
+
+def get_qsv_info() -> dict:
+    global _QSV_INFO
+    if _QSV_INFO is None:
+        _QSV_INFO = detect_intel_qsv()
+    return _QSV_INFO
+
+
+# ============================================================
+# HELPER: QSV ENCODE PARAMS
+# ============================================================
+
+def get_encode_params(qsv: dict, quality: str = "balanced") -> tuple[list, int, str]:
+    """
+    Trả về (codec_flags, quality_val, encode_mode)
+
+    QSV: dùng -q:v (VBR quality-based) với bitrate cap thay vì ICQ
+    CPU: dùng -crf như cũ
+    """
+    quality_map = {
+        "fast":     {"crf": 23, "preset": "fast",   "qsv_q": 25, "maxrate": "2000k", "bufsize": "4000k"},
+        "balanced": {"crf": 21, "preset": "medium", "qsv_q": 23, "maxrate": "3000k", "bufsize": "6000k"},
+        "best":     {"crf": 18, "preset": "slow",   "qsv_q": 20, "maxrate": "5000k", "bufsize": "10000k"},
+    }
+    cfg = quality_map.get(quality, quality_map["balanced"])
+
+    if qsv["available"]:
+        codec_flags = [
+            "-c:v", "h264_qsv",
+            "-preset", "medium",
+            "-q:v",     str(cfg["qsv_q"]),   # quality target
+            "-maxrate", cfg["maxrate"],        # ← GIỚI HẠN BITRATE TỐI ĐA
+            "-bufsize", cfg["bufsize"],        # ← buffer = 2x maxrate
+            "-profile:v", "high",
+            "-level",     "4.1",
+        ]
+        return codec_flags, cfg["qsv_q"], f"h264_qsv+VBR(max={cfg['maxrate']})"
+    else:
+        codec_flags = [
+            "-c:v", "libx264",
+            "-preset", cfg["preset"],
+            "-crf",    str(cfg["crf"]),
+            "-profile:v", "high",
+        ]
+        return codec_flags, cfg["crf"], f"libx264+CRF{cfg['crf']}"
+
+
+# ============================================================
+# SUBTITLE HELPERS (GIỮ NGUYÊN)
+# ============================================================
+
 def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
     parts = re.split(r'\\N', text)
     result = []
-
     for part in parts:
         part = part.strip()
         if not part:
             continue
-
         sub_parts = re.split(r'(?<=[.!?…])\s+', part)
-
         for sub in sub_parts:
             sub = sub.strip()
             if not sub:
                 continue
-
             if len(sub) > max_chars:
                 comma_parts = re.split(r'(?<=[;:,])\s+', sub)
                 for cp in comma_parts:
@@ -35,7 +132,6 @@ def _split_text_into_sentences(text: str, max_chars: int = 35) -> list:
                         result.append(cp)
             else:
                 result.append(sub)
-
     return result if result else [text.strip()]
 
 
@@ -109,7 +205,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 char_ratio = len(sentence) / total_chars
                 duration   = int(total_duration * char_ratio)
                 seg_end_ms = end_ms if i == len(sentences) - 1 else current_ms + duration
-
                 events.append(
                     f"Dialogue: 0,{_ms_to_ass_time(current_ms)},{_ms_to_ass_time(seg_end_ms)},"
                     f"Default,,0,0,0,,{sentence}"
@@ -128,6 +223,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 router = APIRouter()
 
+
+# ============================================================
+# VIDEO / AUDIO HELPERS
+# ============================================================
+
 def get_video_duration(video_path):
     try:
         result = subprocess.run(
@@ -139,6 +239,7 @@ def get_video_duration(video_path):
     except Exception as e:
         print(f"   ⚠️  Không lấy được thời lượng video: {e}")
         return None
+
 
 def get_video_dimensions(video_path):
     try:
@@ -154,6 +255,7 @@ def get_video_dimensions(video_path):
         print(f"   ⚠️  Không lấy được kích thước video: {e}")
         return None, None
 
+
 def parse_ffmpeg_progress(line, total_duration):
     time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', line)
     if time_match and total_duration:
@@ -162,6 +264,7 @@ def parse_ffmpeg_progress(line, total_duration):
         progress = (current_time / total_duration) * 100
         return current_time, min(progress, 100)
     return None, None
+
 
 def escape_srt_path(path: str) -> str:
     path = path.replace("\\", "/")
@@ -173,37 +276,37 @@ def escape_srt_path(path: str) -> str:
 # CHỐNG BẢN QUYỀN - VIDEO CHAIN
 # ============================================================
 
-def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_height: int) -> tuple[str, dict]:
+def build_copyright_bypass_video_chain(
+        base_chain: str, video_width: int, video_height: int
+) -> tuple[str, dict]:
     params = {}
 
-    saturation  = round(random.uniform(1.15, 1.35), 2)
-    contrast    = round(random.uniform(1.08, 1.18), 2)
-    brightness  = round(random.uniform(0.02, 0.08), 3)
-    gamma       = round(random.uniform(0.95, 1.05), 2)
-    params["saturation"]  = saturation
-    params["contrast"]    = contrast
-    params["brightness"]  = brightness
-    params["gamma"]       = gamma
+    saturation = round(random.uniform(1.15, 1.35), 2)
+    contrast   = round(random.uniform(1.08, 1.18), 2)
+    brightness = round(random.uniform(0.02, 0.08), 3)
+    gamma      = round(random.uniform(0.95, 1.05), 2)
+    params.update(saturation=saturation, contrast=contrast,
+                  brightness=brightness, gamma=gamma)
 
-    chain = f"{base_chain}eq=saturation={saturation}:contrast={contrast}:brightness={brightness}:gamma={gamma}"
+    chain = (f"{base_chain}eq=saturation={saturation}:contrast={contrast}"
+             f":brightness={brightness}:gamma={gamma}")
     print(f"   🎨 COLOR GRADING: sat={saturation} con={contrast} bri={brightness} gam={gamma}")
 
     if video_width and video_height:
         crop_pct = round(random.uniform(0.02, 0.04), 3)
-        crop_w   = int(video_width  * (1 - crop_pct))
-        crop_h   = int(video_height * (1 - crop_pct))
-        crop_w   = crop_w - (crop_w % 2)
-        crop_h   = crop_h - (crop_h % 2)
-        crop_x   = (video_width  - crop_w) // 2
-        crop_y   = (video_height - crop_h) // 2
-        chain   += f",crop={crop_w}:{crop_h}:{crop_x}:{crop_y},scale={video_width}:{video_height}"
+        crop_w = int(video_width  * (1 - crop_pct)); crop_w -= crop_w % 2
+        crop_h = int(video_height * (1 - crop_pct)); crop_h -= crop_h % 2
+        crop_x = (video_width  - crop_w) // 2
+        crop_y = (video_height - crop_h) // 2
+        chain += (f",crop={crop_w}:{crop_h}:{crop_x}:{crop_y}"
+                  f",scale={video_width}:{video_height}")
         params["crop_pct"] = crop_pct
-        print(f"   ✂️  CROP: {crop_pct*100:.1f}% → {crop_w}x{crop_h} → scale lại {video_width}x{video_height}")
+        print(f"   ✂️  CROP: {crop_pct*100:.1f}% → {crop_w}x{crop_h} → scale {video_width}x{video_height}")
 
     noise_strength = round(random.uniform(1.5, 3.5), 1)
     chain += f",noise=alls={noise_strength}:allf=t+u"
     params["noise_strength"] = noise_strength
-    print(f"   🌫️  NOISE: strength={noise_strength} (bypass perceptual hash)")
+    print(f"   🌫️  NOISE: strength={noise_strength}")
 
     sharpen_luma = round(random.uniform(0.3, 0.8), 2)
     chain += f",unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount={sharpen_luma}"
@@ -218,9 +321,7 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
     font_arial = "C\\:/Windows/Fonts/arial.ttf"
 
     if video_width and video_height:
-        vw = video_width
-        vh = video_height
-
+        vw, vh = video_width, video_height
         top_h   = 100
         top_mid = top_h // 2
         line1_y = top_mid - 16
@@ -235,14 +336,10 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
             f":shadowcolor=black@0.5:shadowx=1:shadowy=1"
         )
 
-        # ── BOTTOM: Tĩnh Ghiền Drama + YouTube ──
         if vh > 1400:
-            # ── Cấu hình cũ: 1 dòng ──
-            bot_h   = 150
-            bot_y   = vh - bot_h
-            bot_mid = bot_y + bot_h // 2
-            line_y  = bot_mid - 40
-
+            bot_h  = 150
+            bot_y  = vh - bot_h
+            line_y = bot_y + bot_h // 2 - 40
             chain += (
                 f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
                 f",drawbox=x=0:y={bot_y}:w={vw}:h=2:color=FFD700@0.6:t=fill"
@@ -253,26 +350,19 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
                 f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
             )
         else:
-            # ── Cấu hình mới: 2 dòng ──
-            bot_h   = 120
-            bot_y   = vh - bot_h
-            bot_mid = bot_y + bot_h // 2
-
-            line1_bot_y = bot_mid - 36   # dòng 1: "Tĩnh Ghiền Drama"
-            line2_bot_y = bot_mid + 8    # dòng 2: "youtube.com/@TinhGhienDrama"
-
+            bot_h       = 120
+            bot_y       = vh - bot_h
+            bot_mid     = bot_y + bot_h // 2
+            line1_bot_y = bot_mid - 36
+            line2_bot_y = bot_mid + 8
             chain += (
                 f",drawbox=x=0:y={bot_y}:w={vw}:h={bot_h}:color=black:t=fill"
                 f",drawbox=x=0:y={bot_y}:w={vw}:h=2:color=FFD700@0.6:t=fill"
-    
-                # Dòng 1
                 f",drawtext=text='Tĩnh Ghiền Drama'"
                 f":fontfile='{font_arial}'"
                 f":fontsize=34:fontcolor=FFD700@0.95"
                 f":x=(w-text_w)/2:y={line1_bot_y}"
                 f":shadowcolor=black@0.7:shadowx=2:shadowy=2"
-    
-                # Dòng 2
                 f",drawtext=text='you tube . com / @TinhGhienDrama'"
                 f":fontfile='{font_arial}'"
                 f":fontsize=30:fontcolor=FFD700@0.85"
@@ -284,44 +374,24 @@ def build_copyright_bypass_video_chain(base_chain: str, video_width: int, video_
 
 
 # ============================================================
-# CHỐNG BẢN QUYỀN - AUDIO (FIX: aresample + aformat)
+# CHỐNG BẢN QUYỀN - AUDIO
 # ============================================================
 
 def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[str, dict]:
-    """
-    XỬ LÝ AUDIO GỐC TIẾNG TRUNG (lồng tiếng phim)
-
-    ⚠️  QUY TẮC SYNC BẮT BUỘC:
-    - TUYỆT ĐỐI KHÔNG dùng atempo / asetrate / pitch shift.
-    - Chỉ dùng filter KHÔNG ảnh hưởng timing.
-
-    FIX: Thêm aresample=44100 + aformat=stereo
-    - Đảm bảo output luôn 44100Hz stereo
-    - Tránh amix lấy sample rate thấp nhất
-    """
     params = {}
-
     music_highpass = random.randint(60, 90)
     music_lowpass  = random.randint(16000, 18000)
-    music_pitch    = None
-    music_tempo    = None
-
-    params["music_pitch"]    = music_pitch
-    params["music_tempo"]    = music_tempo
-    params["music_highpass"] = music_highpass
-    params["music_lowpass"]  = music_lowpass
+    params.update(music_pitch=None, music_tempo=None,
+                  music_highpass=music_highpass, music_lowpass=music_lowpass)
 
     print(f"   🎵 AUDIO TIẾNG TRUNG (giữ sync khẩu hình):")
-    print(f"      • Pitch Shift : BỎ QUA ← thay đổi sẽ gây lệch sync!")
-    print(f"      • Tempo       : BỎ QUA ← thay đổi sẽ gây lệch sync!")
-    print(f"      • Resample    : 44100 Hz (FIX: giữ chất lượng audio)")
-    print(f"      • Format      : stereo (FIX: tránh output mono)")
+    print(f"      • Pitch/Tempo : BỎ QUA (giữ sync)")
+    print(f"      • Resample    : 44100 Hz")
+    print(f"      • Format      : stereo")
     print(f"      • High-pass   : {music_highpass} Hz")
     print(f"      • Low-pass    : {music_lowpass} Hz")
     print(f"      • Volume      : {m_vol}")
-    print(f"   ✅ Timing 100% giữ nguyên → tiếng Trung khớp khẩu hình diễn viên")
 
-    # FIX: aresample + aformat TRƯỚC các filter khác
     chain = (
         f"{music_input_label}"
         f"aresample=44100,"
@@ -330,15 +400,21 @@ def build_music_copyright_bypass(music_input_label: str, m_vol: float) -> tuple[
         f"lowpass=f={music_lowpass},"
         f"volume={m_vol}[bg]"
     )
-
     return chain, params
 
 
-# --- API MIX VIDEO (GHÉP PHIM) ---
+# ============================================================
+# API MIX VIDEO
+# ============================================================
+
 @router.post("/api/v1/dubbing/crop-video")
 def api_mix(req: MixRequest):
     start_time = time.time()
-    Logger.section("GHÉP VIDEO (FFMPEG) - CHỐNG BẢN QUYỀN v2.1")
+    Logger.section("GHÉP VIDEO (FFMPEG) - INTEL QSV ACCELERATION v3.0")
+
+    # ── Phát hiện GPU ──────────────────────────────────────
+    qsv = get_qsv_info()
+    print(f"\n   🖥️  GPU MODE: {'Intel QSV (Hardware)' if qsv['available'] else 'CPU (libx264 fallback)'}")
 
     extracted_audio_temp = None
     ass_temp_path = None
@@ -346,61 +422,66 @@ def api_mix(req: MixRequest):
     try:
         vid, inst, voice = req.video_input, req.instrumental, req.voice_dub
 
-        if not os.path.exists(vid): raise FileNotFoundError(f"Thiếu Video: {vid}")
+        if not os.path.exists(vid):   raise FileNotFoundError(f"Thiếu Video: {vid}")
         if not os.path.exists(voice): raise FileNotFoundError(f"Thiếu Voice: {voice}")
 
         m_vol = req.music_volume if req.music_volume is not None else DEFAULT_MUSIC_VOLUME
 
-        # Xử lý trường hợp nhạc nền là video gốc
+        # Trích xuất audio nếu nhạc nền = video gốc
         if inst and os.path.normpath(inst) == os.path.normpath(vid):
             print("   🎵 Phát hiện nhạc nền = video gốc, tự động trích xuất audio...")
             video_dir = os.path.dirname(vid)
             extracted_audio = os.path.join(video_dir, f"extracted_audio_{get_timestamp_str()}.mp3")
             extracted_audio_temp = extracted_audio
-
             try:
                 subprocess.run(
-                    ["ffmpeg", "-y", "-i", vid, "-vn", "-acodec", "libmp3lame",
-                     "-b:a", "192k", extracted_audio],
+                    ["ffmpeg", "-y", "-i", vid, "-vn", "-acodec", "libmp3lame", "-b:a", "192k", extracted_audio],
                     capture_output=True, text=True, check=True
                 )
                 inst = extracted_audio
                 print(f"   ✅ Đã trích xuất audio: {extracted_audio}")
             except subprocess.CalledProcessError as e:
-                print(f"   ⚠️  Không trích xuất được audio từ video gốc: {e}")
+                print(f"   ⚠️  Không trích xuất được audio: {e}")
                 inst = None
                 extracted_audio_temp = None
 
         has_music = (m_vol > 0) and inst and os.path.exists(inst)
 
         video_dir = os.path.dirname(vid)
-        out_file = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
+        out_file  = os.path.join(video_dir, f"out_vi_{get_timestamp_str()}.mp4")
 
         print("   📊 Đang phân tích video...")
-        total_duration = get_video_duration(vid)
+        total_duration               = get_video_duration(vid)
+        video_width, video_height    = get_video_dimensions(vid)
+
         if total_duration:
-            print(f"   ⏱️  Thời lượng video: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
-
-        video_width, video_height = get_video_dimensions(vid)
+            print(f"   ⏱️  Thời lượng: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
         if video_width and video_height:
-            print(f"   📐 Kích thước video: {video_width}x{video_height}")
+            print(f"   📐 Kích thước: {video_width}x{video_height}")
 
-        inputs = []
+        # ── Encode params theo GPU/CPU ──────────────────────
+        codec_flags, quality_val, encode_mode = get_encode_params(qsv, quality="balanced")
+        print(f"   ⚙️  ENCODE MODE: {encode_mode} | Quality={quality_val}")
+
+        inputs  = []
         filters = []
 
         print("\n   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("   🛡️  CHỐNG BẢN QUYỀN - VIDEO TRANSFORMATION")
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        base_chain = f"[0:v]"
+        # ── Video filter chain ──────────────────────────────
+        # Khi dùng QSV, các filter CPU vẫn chạy ở software (libavfilter)
+        # rồi mới encode bằng h264_qsv. Đây là cách hoạt động đúng.
+        base_chain = "[0:v]"
         video_chain, video_transform_params = build_copyright_bypass_video_chain(
             base_chain, video_width, video_height
         )
 
-        saturation   = video_transform_params["saturation"]
-        contrast     = video_transform_params["contrast"]
-        brightness   = video_transform_params["brightness"]
-        gamma        = video_transform_params["gamma"]
+        saturation = video_transform_params["saturation"]
+        contrast   = video_transform_params["contrast"]
+        brightness = video_transform_params["brightness"]
+        gamma      = video_transform_params["gamma"]
 
         if req.remove_logo:
             print(f"\n   🛡️  Xóa Logo: BẬT (x={req.logo_x}, y={req.logo_y}, w={req.logo_w}, h={req.logo_h})")
@@ -417,38 +498,31 @@ def api_mix(req: MixRequest):
                             found_srt = os.path.join(video_dir_sub, f)
                             break
                 except Exception as _e:
-                    print(f"   ⚠️  Lỗi khi tìm file SRT: {_e}")
+                    print(f"   ⚠️  Lỗi khi tìm SRT: {_e}")
                 if found_srt:
                     print(f"   🔍 Tự động tìm thấy SRT vi_FULL: {found_srt}")
                     req.subtitle_path = found_srt
                     has_subtitle = True
                 else:
-                    print(f"   ⚠️  Không tìm thấy file SRT vi_FULL trong: {video_dir_sub}")
+                    print(f"   ⚠️  Không tìm thấy SRT vi_FULL trong: {video_dir_sub}")
 
             if has_subtitle:
                 print(f"   📝 Vietsub: BẬT - {req.subtitle_path}")
-
                 font_size  = req.subtitle_font_size
                 logo_y_val = req.logo_y
                 logo_h_val = req.logo_h
                 vw = video_width  or 720
                 vh = video_height or 1280
-
                 margin_v = (vh - logo_y_val - logo_h_val) + max(0, (logo_h_val - font_size) // 2)
                 margin_v = max(0, margin_v)
-
                 print(f"   📐 {vw}x{vh} | logo_y={logo_y_val} logo_h={logo_h_val} font={font_size} MarginV={margin_v}")
 
                 ass_temp_path = req.subtitle_path.replace(".srt", "_temp_burn.ass")
                 try:
                     _srt_to_ass(
-                        srt_path=req.subtitle_path,
-                        ass_path=ass_temp_path,
-                        video_w=vw,
-                        video_h=vh,
-                        font_size=font_size,
-                        outline=req.subtitle_border_width,
-                        margin_v=margin_v,
+                        srt_path=req.subtitle_path, ass_path=ass_temp_path,
+                        video_w=vw, video_h=vh, font_size=font_size,
+                        outline=req.subtitle_border_width, margin_v=margin_v,
                     )
                     print(f"   ✅ Đã tạo ASS: {ass_temp_path}")
                 except Exception as e:
@@ -456,37 +530,32 @@ def api_mix(req: MixRequest):
                     ass_temp_path = None
 
                 if ass_temp_path and os.path.exists(ass_temp_path):
-                    ass_escaped = escape_srt_path(ass_temp_path)
+                    ass_escaped  = escape_srt_path(ass_temp_path)
                     video_chain += f",ass='{ass_escaped}'"
-                    print(f"   🎬 Đã thêm ASS filter vào chain")
+                    print("   🎬 Đã thêm ASS filter vào chain")
                 else:
-                    print(f"   ⚠️  Bỏ qua subtitle do lỗi tạo ASS")
+                    print("   ⚠️  Bỏ qua subtitle do lỗi tạo ASS")
             else:
                 if req.subtitle_path:
                     print(f"   ⚠️  File SRT không tồn tại: {req.subtitle_path}")
                 else:
-                    print(f"   📝 Vietsub: TẮT")
+                    print("   📝 Vietsub: TẮT")
 
             if req.branding_text:
                 print(f"   💧 Watermark Text: '{DEFAULT_BRAND_TEXT}'")
-
                 font_size_wm = 28
-                alpha = round(random.uniform(0.25, 0.35), 2)
-                speed_x = random.randint(48, 50)
-                speed_y = random.randint(48, 50)
-                direction_x = random.choice([1, -1])
-                direction_y = random.choice([1, -1])
-                start_x = random.randint(0, 480)
-                start_y = random.randint(0, 480)
-
-                print(f"   📐 Font: {font_size_wm}px | Alpha: {alpha} | Speed: ({speed_x},{speed_y})px/s")
+                alpha        = round(random.uniform(0.25, 0.35), 2)
+                speed_x      = random.randint(48, 50)
+                speed_y      = random.randint(48, 50)
+                direction_x  = random.choice([1, -1])
+                direction_y  = random.choice([1, -1])
+                start_x      = random.randint(0, 480)
+                start_y      = random.randint(0, 480)
 
                 escaped_text = DEFAULT_BRAND_TEXT.replace(':', '\\:').replace("'", "\\'")
-                margin = 10
-                range_x = f"w-tw-{margin*2}"
-                move_x  = f"abs(mod({start_x}+{speed_x}*{direction_x}*t\\,2*({range_x}))-({range_x}))+{margin}"
-                range_y = f"h-th-{margin*2}"
-                move_y  = f"abs(mod({start_y}+{speed_y}*{direction_y}*t\\,2*({range_y}))-({range_y}))+{margin}"
+                margin  = 10
+                move_x  = f"abs(mod({start_x}+{speed_x}*{direction_x}*t\\,2*(w-tw-{margin*2}))-(w-tw-{margin*2}))+{margin}"
+                move_y  = f"abs(mod({start_y}+{speed_y}*{direction_y}*t\\,2*(h-th-{margin*2}))-(h-th-{margin*2}))+{margin}"
 
                 video_chain += (
                     f",drawtext=text='{escaped_text}':fontsize={font_size_wm}"
@@ -495,8 +564,7 @@ def api_mix(req: MixRequest):
                 )
 
             brand_img_path = "D:/Dubbing/logo_tinh.png"
-
-            has_branding = brand_img_path and os.path.exists(brand_img_path)
+            has_branding   = brand_img_path and os.path.exists(brand_img_path)
 
             if has_branding:
                 print("   ✅ Chèn Ảnh Thương hiệu: BẬT")
@@ -513,7 +581,6 @@ def api_mix(req: MixRequest):
 
                 filters.append(f"[{brand_idx}:v]scale=120:120[v_brand]")
                 filters.append(f"[v_delogo][v_brand]overlay=x=10:y=10[v_out]")
-
                 video_map = "[v_out]"
             else:
                 print("   ⚠️  Chèn Ảnh Thương hiệu: TẮT")
@@ -542,13 +609,11 @@ def api_mix(req: MixRequest):
         print("   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         if has_music:
-            print(f"   🎚️  Chế độ: MIXING (Tiếng Việt lồng + Tiếng Trung gốc)")
+            print("   🎚️  Chế độ: MIXING (Tiếng Việt lồng + Tiếng Trung gốc)")
             duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
             voice_idx = 2
             music_idx = 1
 
-            # FIX: aresample=44100 + aformat=stereo TRƯỚC volume
-            # Đảm bảo output luôn 44100Hz stereo dù TTS source là 16kHz mono
             voice_final = (
                 f"[{voice_idx}:a]"
                 f"aresample=44100,"
@@ -557,29 +622,20 @@ def api_mix(req: MixRequest):
                 f"lowshelf=g=5:f=100:w=0.5[voice]"
             )
             filters.append(voice_final)
-            filters.append(f"[voice]asplit[v_trig][v_mix]")
+            filters.append("[voice]asplit[v_trig][v_mix]")
 
-            music_filter, music_params = build_music_copyright_bypass(
-                f"[{music_idx}:a]", m_vol
-            )
-            music_pitch    = music_params["music_pitch"]
+            music_filter, music_params = build_music_copyright_bypass(f"[{music_idx}:a]", m_vol)
             music_highpass = music_params["music_highpass"]
             music_lowpass  = music_params["music_lowpass"]
-            music_tempo    = music_params["music_tempo"]
 
             filters.append(music_filter)
             filters.append(f"[bg][v_trig]sidechaincompress=threshold=0.1:ratio={duck}:attack={atk}:release={rel}[bg_duck]")
-            filters.append(f"[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
-
+            filters.append("[bg_duck][v_mix]amix=inputs=2:duration=longest[a_out]")
         else:
-            print(f"   🎚️  Chế độ: VOICE ONLY")
+            print("   🎚️  Chế độ: VOICE ONLY")
             voice_idx = 1
-            music_pitch    = None
-            music_highpass = None
-            music_lowpass  = None
-            music_tempo    = None
+            music_highpass = music_lowpass = None
 
-            # FIX: aresample=44100 + aformat=stereo TRƯỚC volume
             voice_final = (
                 f"[{voice_idx}:a]"
                 f"aresample=44100,"
@@ -591,78 +647,87 @@ def api_mix(req: MixRequest):
 
         filter_complex = ";".join(filters)
 
-        crf_value = 23
-        preset_choice = "fast"
+        # ── Build FFmpeg command với QSV ────────────────────
+        # NOTE: Với Intel QSV, KHÔNG dùng -hwaccel ở đầu input
+        # vì các filter (eq, crop, drawtext, ass...) là CPU-based.
+        # FFmpeg sẽ tự upload frame lên GPU khi cần encode.
+        cmd = (
+                ["ffmpeg", "-y", "-progress", "pipe:1"]
+                + inputs
+                + [
+                    "-filter_complex", filter_complex,
+                    "-map", video_map,
+                    "-map", "[a_out]",
+                ]
+                + codec_flags                          # ← QSV hoặc libx264
+                + [
+                    "-metadata", f"comment=Processed_{get_timestamp_str()}",
+                    "-metadata", "encoder=CustomEncoder",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-ar",  "44100",
+                    "-ac",  "2",
+                    out_file,
+                ]
+        )
 
-        cmd = ["ffmpeg", "-y", "-progress", "pipe:1"] + inputs + [
-            "-filter_complex", filter_complex,
-            "-map", video_map, "-map", "[a_out]",
-            "-c:v", "libx264", "-preset", preset_choice, "-crf", str(crf_value),
-            "-metadata", f"comment=Processed_{get_timestamp_str()}",
-            "-metadata", "encoder=CustomEncoder",
-            # FIX: explicit -ar và -ac đảm bảo audio output đúng thông số
-            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            out_file
-        ]
-
-        print(f"\n   ⚙️  ENCODE PARAMS: CRF={crf_value} | Preset={preset_choice}")
-        print(f"   🔊 AUDIO OUTPUT: 44100Hz | Stereo | 192kbps")
+        print(f"\n   ⚙️  ENCODE: {encode_mode}")
+        print(f"   🖥️  GPU: {'Intel UHD 770 (QSV)' if qsv['available'] else 'CPU fallback'}")
+        print(f"   🔊 AUDIO: 44100Hz | Stereo | 192kbps AAC")
         print("   ⏳ Đang render FFmpeg...")
-        print(f"   📹 Video: {vid} ({os.path.getsize(vid)} bytes)")
-        print(f"   🎤 Voice: {voice} ({os.path.getsize(voice)} bytes)")
+        print(f"   📹 Video: {vid} ({os.path.getsize(vid):,} bytes)")
+        print(f"   🎤 Voice: {voice} ({os.path.getsize(voice):,} bytes)")
         if has_music:
-            print(f"   🎵 Music (tiếng Trung): {inst} ({os.path.getsize(inst)} bytes)")
+            print(f"   🎵 Music: {inst} ({os.path.getsize(inst):,} bytes)")
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         render_start = time.time()
-        last_progress_update = 0
 
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             universal_newlines=True,
-            bufsize=1
+            bufsize=1,
         )
 
         stderr_output = []
-
         import threading
+
         def read_stderr():
             for line in process.stderr:
                 stderr_output.append(line)
 
-        stderr_thread = threading.Thread(target=read_stderr)
-        stderr_thread.daemon = True
-        stderr_thread.start()
+        threading.Thread(target=read_stderr, daemon=True).start()
 
         for line in process.stdout:
             current_time, progress = parse_ffmpeg_progress(line, total_duration)
             if progress is not None:
                 elapsed = time.time() - render_start
-
                 if progress > 0:
                     eta = (elapsed / progress * 100) - elapsed
-                    msg = f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s | ETA: ~{eta:5.1f}s"
+                    msg = f"   ⏳ {progress:5.1f}% | {elapsed:5.1f}s elapsed | ETA ~{eta:5.1f}s"
                 else:
-                    msg = f"   ⏳ Tiến độ: {progress:5.1f}% | Thời gian: {elapsed:5.1f}s"
-
+                    msg = f"   ⏳ {progress:5.1f}% | {elapsed:5.1f}s elapsed"
                 print(f"\r{msg}", end="", flush=True)
-                last_progress_update = progress
 
         print()
         process.wait()
-        print("="*60 + "\n")
+        print("=" * 60 + "\n")
 
         if process.returncode != 0:
+            # QSV có thể fail nếu driver thiếu → thử lại với CPU
+            qsv_error = any("qsv" in l.lower() or "mfx" in l.lower() for l in stderr_output)
+            if qsv_error and qsv["available"]:
+                print("   ⚠️  QSV encode thất bại! Tự động fallback sang CPU libx264...")
+                _QSV_INFO["available"] = False  # tắt QSV cho các lần sau
+                return api_mix(req)             # gọi lại với CPU
+
             print("\n❌ FFMPEG STDERR:")
             print("".join(stderr_output[-20:]))
-            raise subprocess.CalledProcessError(
-                process.returncode, cmd,
-                stderr="".join(stderr_output)
-            )
+            raise subprocess.CalledProcessError(process.returncode, cmd, stderr="".join(stderr_output))
 
-        total_time = time.time() - start_time
+        total_time  = time.time() - start_time
         render_time = time.time() - render_start
 
         for tmp in [extracted_audio_temp, ass_temp_path]:
@@ -674,46 +739,45 @@ def api_mix(req: MixRequest):
                     print(f"   ⚠️  Không xóa được file tạm: {e}")
 
         Logger.success("XỬ LÝ THÀNH CÔNG!", total_time)
-        print(f"   ⏱️  Thời gian render: {render_time:.2f}s")
-        print(f"   ⏱️  Tổng thời gian: {total_time:.2f}s")
-        print(f"   📦 Kích thước file: {os.path.getsize(out_file) / 1024 / 1024:.2f} MB")
-        print(f"   👉 File đích: {out_file}")
+        file_size_mb = os.path.getsize(out_file) / 1024 / 1024
+        print(f"   ⏱️  Render: {render_time:.2f}s | Tổng: {total_time:.2f}s")
+        print(f"   📦 Kích thước: {file_size_mb:.2f} MB")
+        print(f"   👉 Output: {out_file}")
 
         return {
             "status": "success",
             "output_file": out_file,
+            "hardware": {
+                "gpu_used": qsv["available"],
+                "gpu_mode": "Intel QSV (UHD 770)" if qsv["available"] else "CPU (libx264)",
+                "encode_mode": encode_mode,
+            },
             "copyright_bypass": {
                 "video_transform": {
-                    "color_grading": {
-                        "saturation": saturation,
-                        "contrast": contrast,
-                        "brightness": brightness,
-                        "gamma": gamma
-                    },
-                    "crop_pct": video_transform_params.get("crop_pct"),
+                    "color_grading": dict(saturation=saturation, contrast=contrast,
+                                          brightness=brightness, gamma=gamma),
+                    "crop_pct":       video_transform_params.get("crop_pct"),
                     "noise_strength": video_transform_params.get("noise_strength"),
-                    "sharpen": video_transform_params.get("sharpen"),
-                    "hue_shift": video_transform_params.get("hue_shift"),
+                    "sharpen":        video_transform_params.get("sharpen"),
+                    "hue_shift":      video_transform_params.get("hue_shift"),
                 },
                 "audio_transform": {
-                    "music_pitch": music_pitch,
-                    "music_tempo": music_tempo,
                     "music_highpass": music_highpass,
-                    "music_lowpass": music_lowpass,
+                    "music_lowpass":  music_lowpass,
                     "resample": "44100Hz",
                     "channels": "stereo",
                 } if has_music else None,
                 "encode": {
-                    "crf": crf_value,
-                    "preset": preset_choice,
-                    "audio_bitrate": "192k",
+                    "mode":             encode_mode,
+                    "quality_val":      quality_val,
+                    "audio_bitrate":    "192k",
                     "audio_samplerate": "44100",
-                    "audio_channels": "2 (stereo)",
-                }
+                    "audio_channels":   "2 (stereo)",
+                },
             },
-            "render_time": f"{render_time:.2f}s",
-            "total_time": f"{total_time:.2f}s",
-            "file_size_mb": f"{os.path.getsize(out_file) / 1024 / 1024:.2f}"
+            "render_time":   f"{render_time:.2f}s",
+            "total_time":    f"{total_time:.2f}s",
+            "file_size_mb":  f"{file_size_mb:.2f}",
         }
 
     except subprocess.CalledProcessError as e:
