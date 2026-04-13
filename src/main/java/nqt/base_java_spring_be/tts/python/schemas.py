@@ -16,17 +16,17 @@ class MixRequest(BaseModel):
     video_input: str
     instrumental: str
     voice_dub: str
-    music_volume: float = None
-    voice_volume: float = None
-    ducking_ratio: float = None
-    attack_time: int = None
-    release_time: int = None
-    remove_logo: bool = False
+    music_volume: float = 1.0
+    voice_volume: float = 3.5
+    ducking_ratio: float = 7.0
+    attack_time: int = 50
+    release_time: int = 300
+    remove_logo: bool = True
     logo_x: int = 20
     logo_y: int = 30
     logo_w: int = 250
     logo_h: int = 40
-    branding_text: str = "Thúy Lụa Drama Review"
+    branding_text: str = "Tĩnh Ghiền Drama"
     subtitle_path: Optional[str] = None          # Đường dẫn file .srt vietsub
     subtitle_font_size: int = 28                 # Cỡ chữ subtitle
     subtitle_font_color: str = "white"           # Màu chữ

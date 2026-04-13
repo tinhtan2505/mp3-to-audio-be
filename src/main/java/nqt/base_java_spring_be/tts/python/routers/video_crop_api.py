@@ -458,6 +458,11 @@ def api_mix(req: MixRequest):
             print(f"   ⏱️  Thời lượng: {total_duration:.2f}s ({int(total_duration//60)}:{int(total_duration%60):02d})")
         if video_width and video_height:
             print(f"   📐 Kích thước: {video_width}x{video_height}")
+            if video_width > 960:
+                req.logo_w = 960
+            else:
+                req.logo_w = 600
+            print(f"   📐 Tự động điều chỉnh: logo_w={req.logo_w} (dựa theo width={video_width})")
 
         # ── Encode params theo GPU/CPU ──────────────────────
         codec_flags, quality_val, encode_mode = get_encode_params(qsv, quality="balanced")
@@ -610,7 +615,7 @@ def api_mix(req: MixRequest):
 
         if has_music:
             print("   🎚️  Chế độ: MIXING (Tiếng Việt lồng + Tiếng Trung gốc)")
-            duck, atk, rel = req.ducking_ratio or 5.0, req.attack_time or 50, req.release_time or 300
+            duck, atk, rel = req.ducking_ratio, req.attack_time, req.release_time
             voice_idx = 2
             music_idx = 1
 
